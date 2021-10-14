@@ -39,7 +39,7 @@ async fn serve_req(_req: Request<Body>) -> Result<Response<Body>, hyper::Error> 
     Ok(response)
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     // Standard log format:
     // log_format combined '$remote_addr - $remote_user [$time_local] '
