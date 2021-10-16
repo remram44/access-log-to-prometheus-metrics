@@ -52,6 +52,13 @@ impl LogCollector {
             loop {
                 rx.recv().expect("notify");
 
+                // Check size
+                let size = file.seek(SeekFrom::End(0)).expect("IO");
+                if size < offset {
+                    eprintln!("Truncation detected ({} -> {})", offset, size);
+                    offset = size;
+                }
+
                 // Read
                 file.seek(SeekFrom::Start(offset)).expect("IO");
                 let res = file.read_to_string(&mut buffer).expect("IO") as u64;
