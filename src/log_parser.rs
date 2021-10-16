@@ -23,8 +23,13 @@ impl<'a> PeekableCharIndicesPosExt for std::iter::Peekable<std::str::CharIndices
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+enum LogToken {
+    Str(String),
+    Field(LogField),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum LogField {
-    Character(char),
     RemoteAddr,
     RemoteUser,
     TimeLocal,
@@ -48,7 +53,7 @@ pub enum LogValue {
 }
 
 pub struct LogParser {
-    fields: Vec<LogField>,
+    fields: Vec<LogToken>,
 }
 
 impl LogParser {
@@ -63,14 +68,14 @@ impl LogParser {
 }
 
 struct LogParserInner<'a> {
-    fields: &'a [LogField],
+    fields: &'a [LogToken],
     log: &'a str,
     iter: std::iter::Peekable<std::str::CharIndices<'a>>,
     values: Vec<LogValue>,
 }
 
 impl<'a> LogParserInner<'a> {
-    fn new(fields: &'a [LogField], log: &'a str) -> LogParserInner<'a> {
+    fn new(fields: &'a [LogToken], log: &'a str) -> LogParserInner<'a> {
         LogParserInner {
             fields,
             log,
@@ -85,18 +90,28 @@ impl<'a> LogParserInner<'a> {
             eprintln!("Matching field {:?}", field);
 
             match field {
-                &LogField::Character(e) => {
-                    match self.iter.next() {
-                        Some((_, a)) => if e != a {
-                            return Err(ParseError(format!("Expected {:?}, found {:?}", e, a)));
+                &LogToken::Str(ref s) => {
+                    let start = self.iter.pos().unwrap_or(self.log.len());
+                    let mut it = s.chars();
+                    loop {
+                        match (it.next(), self.iter.peek()) {
+                            (None, None) => break,
+                            (Some(e), Some(&(i, a))) => {
+                                if e == a {
+                                    self.iter.next();
+                                } else {
+                                    return Err(ParseError(format!("Expected {:?}, found {:?}", s, &self.log[start..i])));
+                                }
+                            }
+                            (None, Some(_)) => break,
+                            (Some(_), None) => return Err(ParseError(format!("Expected {:?}, found {:?}", s, &self.log[start..]))),
                         }
-                        None => return Err(ParseError(format!("Expected {:?}, got end of string", e))),
                     }
                 }
-                f => {
+                &LogToken::Field(ref f) => {
                     let next = match self.fields.get(i + 1) {
                         None => None,
-                        Some(&LogField::Character(sep)) => Some(sep),
+                        Some(&LogToken::Str(ref s)) => Some(s.chars().next().unwrap()),
                         Some(n) => return Err(ParseError(format!("Can't parse, no separator between {:?} and {:?}", f, n))),
                     };
 
@@ -133,7 +148,6 @@ impl<'a> LogParserInner<'a> {
                     };
 
                     match f {
-                        LogField::Character(_) => unreachable!(),
                         LogField::RemoteAddr => self.values.push(LogValue::RemoteAddr(value)),
                         LogField::RemoteUser => self.values.push(LogValue::RemoteUser(value)),
                         LogField::TimeLocal => self.values.push(LogValue::TimeLocal(value)),
@@ -153,7 +167,7 @@ impl<'a> LogParserInner<'a> {
 struct LogFormatParser<'a> {
     format: &'a str,
     iter: std::iter::Peekable<std::str::CharIndices<'a>>,
-    fields: Vec<LogField>,
+    fields: Vec<LogToken>,
 }
 
 impl<'a> LogFormatParser<'a> {
@@ -165,7 +179,7 @@ impl<'a> LogFormatParser<'a> {
         }
     }
 
-    fn parse(mut self) -> Result<Vec<LogField>, ParseError> {
+    fn parse(mut self) -> Result<Vec<LogToken>, ParseError> {
         self.skip_whitespace();
         if self.iter.peek().is_none() {
             return Err(ParseError("Empty string".to_owned()));
@@ -209,7 +223,7 @@ impl<'a> LogFormatParser<'a> {
 
     fn parse_format(&mut self) -> Result<(), ParseError> {
         eprintln!("Parsing");
-        while let Some(&(i, c)) = self.iter.peek() {
+        while let Some(&(_, c)) = self.iter.peek() {
             if c == '\'' {
                 break;
             } else if c == '$' {
@@ -218,28 +232,35 @@ impl<'a> LogFormatParser<'a> {
                 let var = self.read_identifier()?;
                 eprintln!("Read identifier: {}", var);
                 if var == "remote_addr" {
-                    self.fields.push(LogField::RemoteAddr);
+                    self.fields.push(LogToken::Field(LogField::RemoteAddr));
                 } else if var == "remote_user" {
-                    self.fields.push(LogField::RemoteUser);
+                    self.fields.push(LogToken::Field(LogField::RemoteUser));
                 } else if var == "time_local" {
-                    self.fields.push(LogField::TimeLocal);
+                    self.fields.push(LogToken::Field(LogField::TimeLocal));
                 } else if var == "request" {
-                    self.fields.push(LogField::Request);
+                    self.fields.push(LogToken::Field(LogField::Request));
                 } else if var == "status" {
-                    self.fields.push(LogField::Status);
+                    self.fields.push(LogToken::Field(LogField::Status));
                 } else if var == "body_bytes_sent" {
-                    self.fields.push(LogField::BodyBytesSent);
+                    self.fields.push(LogToken::Field(LogField::BodyBytesSent));
                 } else if var == "http_referer" {
-                    self.fields.push(LogField::HttpReferer);
+                    self.fields.push(LogToken::Field(LogField::HttpReferer));
                 } else if var == "http_user_agent" {
-                    self.fields.push(LogField::HttpUserAgent);
+                    self.fields.push(LogToken::Field(LogField::HttpUserAgent));
                 } else {
                     return Err(ParseError(format!("Unknown variable: {}", var)));
                 }
             } else {
                 eprintln!("Found character {:?}", c);
                 self.iter.next();
-                self.fields.push(LogField::Character(c));
+                match self.fields.last_mut() {
+                    Some(LogToken::Str(ref mut s)) => s.push(c),
+                    _ => {
+                        let mut s = String::new();
+                        s.push(c);
+                        self.fields.push(LogToken::Str(s));
+                    }
+                }
             }
         }
         Ok(())
@@ -252,7 +273,7 @@ impl<'a> LogFormatParser<'a> {
                     self.iter.next();
                     return;
                 }
-                Some((i, c)) => {
+                Some((_, c)) => {
                     if c.is_whitespace() {
                         self.iter.next();
                     } else {
@@ -310,23 +331,37 @@ impl<'a> LogFormatParser<'a> {
 
 #[test]
 fn test_format_parser() {
+    use LogToken::Field;
+    use LogField::*;
+
+    fn s(r: &str) -> LogToken {
+        LogToken::Str(r.to_owned())
+    }
+
     assert_eq!(
         LogFormatParser::new("log_format combined '$remote_addr - $remote_user [$time_local]';").parse().unwrap(),
-        vec![LogField::RemoteAddr, LogField::Character(' '), LogField::Character('-'), LogField::Character(' '), LogField::RemoteUser, LogField::Character(' '), LogField::Character('['), LogField::TimeLocal, LogField::Character(']')],
+        vec![Field(RemoteAddr), s(" - "), Field(RemoteUser), s(" ["), Field(TimeLocal), s("]")],
     );
     assert_eq!(
         LogFormatParser::new("    log_format '$remote_addr - $remote_user [$time_local]';  ").parse().unwrap(),
-        vec![LogField::RemoteAddr, LogField::Character(' '), LogField::Character('-'), LogField::Character(' '), LogField::RemoteUser, LogField::Character(' '), LogField::Character('['), LogField::TimeLocal, LogField::Character(']')],
+        vec![Field(RemoteAddr), s(" - "), Field(RemoteUser), s(" ["), Field(TimeLocal), s("]")],
     );
     assert_eq!(
         LogFormatParser::new("$remote_addr - $remote_user [$time_local]").parse().unwrap(),
-        vec![LogField::RemoteAddr, LogField::Character(' '), LogField::Character('-'), LogField::Character(' '), LogField::RemoteUser, LogField::Character(' '), LogField::Character('['), LogField::TimeLocal, LogField::Character(']')],
+        vec![Field(RemoteAddr), s(" - "), Field(RemoteUser), s(" ["), Field(TimeLocal), s("]")],
     );
 }
 
 #[test]
 fn test_parser() {
-    let parser = LogParser { fields: vec![LogField::RemoteAddr, LogField::Character(' '), LogField::Character('-'), LogField::Character(' '), LogField::RemoteUser, LogField::Character(' '), LogField::Character('['), LogField::TimeLocal, LogField::Character(']')] };
+    use LogToken::Field;
+    use LogField::*;
+
+    fn s(r: &str) -> LogToken {
+        LogToken::Str(r.to_owned())
+    }
+
+    let parser = LogParser { fields: vec![Field(RemoteAddr), s(" - "), Field(RemoteUser), s(" ["), Field(TimeLocal), s("]")] };
 
     assert_eq!(
         parser.parse("216.165.95.86 - remi [15/Oct/2021:15:39:52 +0000]").unwrap(),
