@@ -38,6 +38,7 @@ enum LogField {
     BodyBytesSent,
     HttpReferer,
     HttpUserAgent,
+    Other(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,6 +51,7 @@ pub enum LogValue {
     BodyBytesSent(u64),
     HttpReferer(String),
     HttpUserAgent(String),
+    Other(String, String),
 }
 
 pub struct LogParser {
@@ -156,6 +158,7 @@ impl<'a> LogParserInner<'a> {
                         LogField::BodyBytesSent => self.values.push(LogValue::BodyBytesSent(value.parse().map_err(|_| ParseError("Invalid status code".to_owned()))?)),
                         LogField::HttpReferer => self.values.push(LogValue::HttpReferer(value)),
                         LogField::HttpUserAgent => self.values.push(LogValue::HttpUserAgent(value)),
+                        LogField::Other(ref s) => self.values.push(LogValue::Other(s.clone(), value)),
                     }
                 }
             }
@@ -248,7 +251,7 @@ impl<'a> LogFormatParser<'a> {
                 } else if var == "http_user_agent" {
                     self.fields.push(LogToken::Field(LogField::HttpUserAgent));
                 } else {
-                    return Err(ParseError(format!("Unknown variable: {}", var)));
+                    self.fields.push(LogToken::Field(LogField::Other(var.to_owned())));
                 }
             } else {
                 eprintln!("Found character {:?}", c);
