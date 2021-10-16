@@ -30,27 +30,21 @@ enum LogToken {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum LogField {
-    RemoteAddr,
     RemoteUser,
-    TimeLocal,
     Request,
     Status,
+    Host,
     BodyBytesSent,
-    HttpReferer,
-    HttpUserAgent,
     Other(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LogValue {
-    RemoteAddr(String),
     RemoteUser(String),
-    TimeLocal(String),
     Request(String),
     Status(u16),
+    Host(String),
     BodyBytesSent(u64),
-    HttpReferer(String),
-    HttpUserAgent(String),
     Other(String, String),
 }
 
@@ -150,14 +144,11 @@ impl<'a> LogParserInner<'a> {
                     };
 
                     match f {
-                        LogField::RemoteAddr => self.values.push(LogValue::RemoteAddr(value)),
                         LogField::RemoteUser => self.values.push(LogValue::RemoteUser(value)),
-                        LogField::TimeLocal => self.values.push(LogValue::TimeLocal(value)),
                         LogField::Request => self.values.push(LogValue::Request(value)),
                         LogField::Status => self.values.push(LogValue::Status(value.parse().map_err(|_| ParseError("Invalid status code".to_owned()))?)),
+                        LogField::Host => self.values.push(LogValue::Host(value)),
                         LogField::BodyBytesSent => self.values.push(LogValue::BodyBytesSent(value.parse().map_err(|_| ParseError("Invalid status code".to_owned()))?)),
-                        LogField::HttpReferer => self.values.push(LogValue::HttpReferer(value)),
-                        LogField::HttpUserAgent => self.values.push(LogValue::HttpUserAgent(value)),
                         LogField::Other(ref s) => self.values.push(LogValue::Other(s.clone(), value)),
                     }
                 }
@@ -234,22 +225,16 @@ impl<'a> LogFormatParser<'a> {
                 self.iter.next();
                 let var = self.read_identifier()?;
                 eprintln!("Read identifier: {}", var);
-                if var == "remote_addr" {
-                    self.fields.push(LogToken::Field(LogField::RemoteAddr));
-                } else if var == "remote_user" {
+                if var == "remote_user" {
                     self.fields.push(LogToken::Field(LogField::RemoteUser));
-                } else if var == "time_local" {
-                    self.fields.push(LogToken::Field(LogField::TimeLocal));
                 } else if var == "request" {
                     self.fields.push(LogToken::Field(LogField::Request));
                 } else if var == "status" {
                     self.fields.push(LogToken::Field(LogField::Status));
+                } else if var == "host" {
+                    self.fields.push(LogToken::Field(LogField::Host));
                 } else if var == "body_bytes_sent" {
                     self.fields.push(LogToken::Field(LogField::BodyBytesSent));
-                } else if var == "http_referer" {
-                    self.fields.push(LogToken::Field(LogField::HttpReferer));
-                } else if var == "http_user_agent" {
-                    self.fields.push(LogToken::Field(LogField::HttpUserAgent));
                 } else {
                     self.fields.push(LogToken::Field(LogField::Other(var.to_owned())));
                 }
@@ -343,15 +328,15 @@ fn test_format_parser() {
 
     assert_eq!(
         LogFormatParser::new("log_format combined '$remote_addr - $remote_user [$time_local]';").parse().unwrap(),
-        vec![Field(RemoteAddr), s(" - "), Field(RemoteUser), s(" ["), Field(TimeLocal), s("]")],
+        vec![Field(Other("remote_addr".to_owned())), s(" - "), Field(RemoteUser), s(" ["), Field(Other("time_local".to_owned())), s("]")],
     );
     assert_eq!(
         LogFormatParser::new("    log_format '$remote_addr - $remote_user [$time_local]';  ").parse().unwrap(),
-        vec![Field(RemoteAddr), s(" - "), Field(RemoteUser), s(" ["), Field(TimeLocal), s("]")],
+        vec![Field(Other("remote_addr".to_owned())), s(" - "), Field(RemoteUser), s(" ["), Field(Other("time_local".to_owned())), s("]")],
     );
     assert_eq!(
         LogFormatParser::new("$remote_addr - $remote_user [$time_local]").parse().unwrap(),
-        vec![Field(RemoteAddr), s(" - "), Field(RemoteUser), s(" ["), Field(TimeLocal), s("]")],
+        vec![Field(Other("remote_addr".to_owned())), s(" - "), Field(RemoteUser), s(" ["), Field(Other("time_local".to_owned())), s("]")],
     );
 }
 
@@ -364,10 +349,10 @@ fn test_parser() {
         LogToken::Str(r.to_owned())
     }
 
-    let parser = LogParser { fields: vec![Field(RemoteAddr), s(" - "), Field(RemoteUser), s(" ["), Field(TimeLocal), s("]")] };
+    let parser = LogParser { fields: vec![Field(Other("remote_addr".to_owned())), s(" - "), Field(RemoteUser), s(" ["), Field(Other("time_local".to_owned())), s("]")] };
 
     assert_eq!(
         parser.parse("216.165.95.86 - remi [15/Oct/2021:15:39:52 +0000]").unwrap(),
-        vec![LogValue::RemoteAddr("216.165.95.86".to_owned()), LogValue::RemoteUser("remi".to_owned()), LogValue::TimeLocal("15/Oct/2021:15:39:52 +0000".to_owned())],
+        vec![LogValue::Other("remote_addr".to_owned(), "216.165.95.86".to_owned()), LogValue::RemoteUser("remi".to_owned()), LogValue::Other("time_local".to_owned(), "15/Oct/2021:15:39:52 +0000".to_owned())],
     );
 }
