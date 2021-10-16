@@ -9,5 +9,6 @@ license = "BSD-3-Clause"
 
 [dependencies]
 prometheus = "0.13"
+clap = "2"
 hyper = { version = "0.14", features = ["server", "http1", "tcp"] }
 tokio = { version = "1.0", features = ["macros", "rt"] }

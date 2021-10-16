@@ -52,7 +52,7 @@ pub struct LogParser {
 }
 
 impl LogParser {
-    fn from_format(format: &str) -> Result<LogParser, ParseError> {
+    pub fn from_format(format: &str) -> Result<LogParser, ParseError> {
         let fields = LogFormatParser::new(format).parse()?;
         Ok(LogParser { fields })
     }
