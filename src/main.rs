@@ -22,16 +22,30 @@ struct LogCollector {
 }
 
 struct Data {
+    active: bool,
     request_count: IntCounterVec,
 }
 
 fn watch_log(filename: &Path, log_parser: &LogParser, data: Arc<Mutex<Data>>) -> Result<(), Box<dyn std::error::Error>> {
-    let mut file = std::fs::OpenOptions::new().read(true).open(&filename)?;
+    let mut file = match std::fs::OpenOptions::new().read(true).open(&filename) {
+        Ok(f) => f,
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                eprintln!("File is missing, retrying...");
+                return Ok(());
+            } else {
+                return Err(e.into());
+            }
+        }
+    };
 
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher: RecommendedWatcher = RecommendedWatcher::new_raw(tx)?;
     watcher.watch(&filename, notify::RecursiveMode::NonRecursive)?;
     let mut offset = file.seek(SeekFrom::End(0))?;
+
+    data.lock().unwrap().active = true;
+    eprintln!("Watch established");
 
     let mut buffer = String::new();
 
@@ -42,8 +56,8 @@ fn watch_log(filename: &Path, log_parser: &LogParser, data: Arc<Mutex<Data>>) ->
         eprintln!("event: {:?}", event);
 
         let reopen = match event.op {
-            Ok(op) if op.contains(notify::op::Op::RENAME | notify::op::Op::REMOVE) => {
-                eprintln!("File moved, restarting watch");
+            Ok(op) if !(notify::op::Op::WRITE | notify::op::Op::CLOSE_WRITE).contains(op) => {
+                eprintln!("Restarting watch");
                 true
             }
             Err(e) => return Err(e.into()),
@@ -51,6 +65,7 @@ fn watch_log(filename: &Path, log_parser: &LogParser, data: Arc<Mutex<Data>>) ->
         };
 
         if reopen {
+            data.lock().unwrap().active = false;
             return Ok(());
         }
 
@@ -103,6 +118,7 @@ fn watch_log(filename: &Path, log_parser: &LogParser, data: Arc<Mutex<Data>>) ->
 impl LogCollector {
     fn new(log_parser: LogParser, filename: PathBuf) -> Result<LogCollector, notify::Error> {
         let data = Data {
+            active: false,
             request_count: IntCounterVec::new(
                 Opts::new("requests", "The total number of requests per HTTP status code and virtual host name"),
                 &["status", "vhost"],
@@ -122,6 +138,7 @@ impl LogCollector {
                         std::process::exit(1);
                     }
                 }
+                std::thread::sleep(std::time::Duration::from_secs(2));
             }
         });
 
@@ -138,7 +155,12 @@ impl Collector for LogCollector {
     }
 
     fn collect(&self) -> Vec<MetricFamily> {
-        self.data.lock().unwrap().request_count.collect()
+        let data = self.data.lock().unwrap();
+        if data.active {
+            data.request_count.collect()
+        } else {
+            Vec::new()
+        }
     }
 }
 
