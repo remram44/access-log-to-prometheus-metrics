@@ -4,30 +4,107 @@ use clap::{App, Arg};
 use hyper::header::CONTENT_TYPE;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Request, Response, Server};
+use notify::{RecommendedWatcher, Watcher};
 use prometheus::{Encoder, Registry, TextEncoder, default_registry, gather};
+use prometheus::{IntCounterVec, Opts};
 use prometheus::core::{Collector, Desc};
 use prometheus::proto::MetricFamily;
-use std::path::Path;
+use std::borrow::Cow::*;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-use log_parser::LogParser;
+use log_parser::{LogValue, LogParser};
 
 struct LogCollector {
-    log_parser: LogParser,
+    data: Arc<Mutex<Data>>,
+    desc: Vec<Desc>,
+}
+
+struct Data {
+    request_count: IntCounterVec,
 }
 
 impl LogCollector {
-    fn new(log_parser: LogParser, filename: &Path) -> LogCollector {
-        LogCollector { log_parser }
+    fn new(log_parser: LogParser, filename: PathBuf) -> Result<LogCollector, notify::Error> {
+        let data = Data {
+            request_count: IntCounterVec::new(
+                Opts::new("requests", "The total number of requests per HTTP status code and virtual host name"),
+                &["status", "vhost"],
+            ).unwrap(),
+        };
+        let desc = data.request_count.desc().iter().cloned().cloned().collect();
+
+        let data = Arc::new(Mutex::new(data));
+
+        let data_rc = data.clone();
+        std::thread::spawn(move || {
+            let mut file = std::fs::OpenOptions::new().read(true).open(&filename).expect("IO");
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut watcher: RecommendedWatcher = RecommendedWatcher::new_raw(tx).expect("notify");
+            watcher.watch(&filename, notify::RecursiveMode::NonRecursive).expect("notify");
+            let mut offset = file.seek(SeekFrom::End(0)).unwrap();
+
+            let mut buffer = String::new();
+
+            // Wait for events
+            loop {
+                rx.recv().expect("notify");
+
+                // Read
+                file.seek(SeekFrom::Start(offset)).expect("IO");
+                let res = file.read_to_string(&mut buffer).expect("IO") as u64;
+                offset += res;
+
+                // Split into lines
+                let mut read_to = 0;
+                while let Some(ln) = buffer[read_to..].find('\n') {
+                    let line = &buffer[read_to..read_to + ln];
+                    eprintln!("line: {:?}", line);
+                    read_to += ln + 1;
+
+                    let values = log_parser.parse(line).unwrap();
+                    let mut remote_user = None;
+                    let mut status = None;
+                    let mut vhost: Option<String> = None;
+                    for value in values {
+                        match value {
+                            LogValue::RemoteUser(s) => remote_user = Some(s),
+                            LogValue::Request(_) => {}
+                            LogValue::Status(i) => status = Some(i),
+                            LogValue::Host(s) => vhost = Some(s),
+                            LogValue::BodyBytesSent(_) => {}
+                            LogValue::Other(_, _) => {}
+                        }
+                    }
+
+                    let data = data_rc.lock().unwrap();
+                    data.request_count.with_label_values(&[
+                        &status.map(|i| Owned(format!("{}", i))).unwrap_or(Borrowed("unk")),
+                        vhost.as_ref().map(|s| -> &str { s }).unwrap_or("unk"),
+                    ]).inc();
+                }
+
+                // Discard the lines from the buffer
+                buffer.drain(0..read_to);
+            }
+        });
+
+        Ok(LogCollector {
+            desc,
+            data,
+        })
     }
 }
 
 impl Collector for LogCollector {
     fn desc(&self) -> Vec<&Desc> {
-        vec![]
+        self.desc.iter().collect()
     }
 
     fn collect(&self) -> Vec<MetricFamily> {
-        vec![]
+        self.data.lock().unwrap().request_count.collect()
     }
 }
 
@@ -76,7 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = cli.get_matches();
 
     let parser = LogParser::from_format(matches.value_of("LOG_FORMAT").unwrap())?;
-    let collector = LogCollector::new(parser, Path::new(matches.value_of_os("FILE").unwrap()));
+    let collector = LogCollector::new(parser, Path::new(matches.value_of_os("FILE").unwrap()).to_owned())?;
 
     let registry: &Registry = default_registry();
     registry.register(Box::new(collector)).expect("register collector");
