@@ -13,5 +13,11 @@ env_logger = { version = "0.7", default-features = false, features = ["termcolor
 hyper = { version = "0.14", features = ["server", "http1", "tcp"] }
 log = "0.4"
 notify = "4"
-prometheus = "0.13"
+prometheus = { version = "0.13", default-features = false }
 tokio = { version = "1.0", features = ["macros", "rt"] }
+
+[profile.release]
+lto = true
+opt-level = "s"
+codegen-units = 1
+panic = "abort"
