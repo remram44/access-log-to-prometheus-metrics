@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2018"
 authors = ["Remi Rampin <remi@rampin.org>"]
 description = "Exports Prometheus metrics by reading a log stream"
-repository = "https://github.com/remram44/nginx-log-to-prometheus-metrics"
+repository = "https://github.com/remram44/access-log-to-prometheus-metrics"
 license = "BSD-3-Clause"
 
 [dependencies]
