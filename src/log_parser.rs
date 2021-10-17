@@ -1,3 +1,5 @@
+use log::debug;
+
 #[derive(Debug)]
 pub struct ParseError(String);
 
@@ -83,7 +85,7 @@ impl<'a> LogParserInner<'a> {
     fn parse(mut self) -> Result<Vec<LogValue>, ParseError> {
         for i in 0..self.fields.len() {
             let field = &self.fields[i];
-            eprintln!("Matching field {:?}", field);
+            debug!("Matching field {:?}", field);
 
             match field {
                 &LogToken::Str(ref s) => {
@@ -113,7 +115,7 @@ impl<'a> LogParserInner<'a> {
 
                     let value = match next {
                         Some(sep) => {
-                            eprintln!("Reading to separator {:?}", sep);
+                            debug!("Reading to separator {:?}", sep);
                             match self.iter.pos() {
                                 Some(start) => {
                                     loop {
@@ -135,7 +137,7 @@ impl<'a> LogParserInner<'a> {
                             }
                         }
                         None => {
-                            eprintln!("Last field, reading to end");
+                            debug!("Last field, reading to end");
                             match self.iter.pos() {
                                 Some(i) => self.log[i..].to_owned(),
                                 None => String::new(),
@@ -179,7 +181,7 @@ impl<'a> LogFormatParser<'a> {
             return Err(ParseError("Empty string".to_owned()));
         }
         if self.maybe_consume("log_format") {
-            eprintln!("Starts with log_format");
+            debug!("Starts with log_format");
             self.skip_whitespace();
             if self.maybe_consume("combined") {
                 self.skip_whitespace();
@@ -189,7 +191,7 @@ impl<'a> LogFormatParser<'a> {
                 _ => return Err(ParseError("Missing \'".to_owned())),
             }
             self.parse_format()?;
-            eprintln!("Finishing up: \"{}\"", if let Some(i) = self.iter.pos() { &self.format[i..] } else { "" });
+            debug!("Finishing up: \"{}\"", if let Some(i) = self.iter.pos() { &self.format[i..] } else { "" });
             match self.iter.next() {
                 Some((_, '\'')) => {},
                 _ => return Err(ParseError("Missing final '".to_owned())),
@@ -216,15 +218,15 @@ impl<'a> LogFormatParser<'a> {
     }
 
     fn parse_format(&mut self) -> Result<(), ParseError> {
-        eprintln!("Parsing");
+        debug!("Parsing");
         while let Some(&(_, c)) = self.iter.peek() {
             if c == '\'' {
                 break;
             } else if c == '$' {
-                eprintln!("Found variable");
+                debug!("Found variable");
                 self.iter.next();
                 let var = self.read_identifier()?;
-                eprintln!("Read identifier: {}", var);
+                debug!("Read identifier: {}", var);
                 if var == "remote_user" {
                     self.fields.push(LogToken::Field(LogField::RemoteUser));
                 } else if var == "request" {
@@ -239,7 +241,7 @@ impl<'a> LogFormatParser<'a> {
                     self.fields.push(LogToken::Field(LogField::Other(var.to_owned())));
                 }
             } else {
-                eprintln!("Found character {:?}", c);
+                debug!("Found character {:?}", c);
                 self.iter.next();
                 match self.fields.last_mut() {
                     Some(LogToken::Str(ref mut s)) => s.push(c),
@@ -279,7 +281,7 @@ impl<'a> LogFormatParser<'a> {
             match (s_iter.next(), self.iter.peek()) {
                 (None, None) => return true,
                 (Some(e), Some(&(_, a))) => {
-                    eprintln!("{:?} {:?} {:?}", e, a, e == a);
+                    debug!("{:?} {:?} {:?}", e, a, e == a);
                     if e == a {
                         self.iter.next();
                     } else {

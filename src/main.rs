@@ -4,6 +4,7 @@ use clap::{App, Arg};
 use hyper::header::CONTENT_TYPE;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Request, Response, Server};
+use log::{debug, info};
 use notify::{RecommendedWatcher, Watcher};
 use prometheus::{Encoder, Registry, TextEncoder, default_registry, gather};
 use prometheus::{IntCounterVec, Opts};
@@ -31,7 +32,7 @@ fn watch_log(filename: &Path, log_parser: &LogParser, data: Arc<Mutex<Data>>) ->
         Ok(f) => f,
         Err(e) => {
             if e.kind() == std::io::ErrorKind::NotFound {
-                eprintln!("File is missing, retrying...");
+                info!("File is missing, retrying...");
                 return Ok(());
             } else {
                 return Err(e.into());
@@ -45,7 +46,7 @@ fn watch_log(filename: &Path, log_parser: &LogParser, data: Arc<Mutex<Data>>) ->
     let mut offset = file.seek(SeekFrom::End(0))?;
 
     data.lock().unwrap().active = true;
-    eprintln!("Watch established");
+    info!("Watch established");
 
     let mut buffer = String::new();
 
@@ -53,11 +54,11 @@ fn watch_log(filename: &Path, log_parser: &LogParser, data: Arc<Mutex<Data>>) ->
     loop {
         let event: notify::RawEvent = rx.recv()?;
 
-        eprintln!("event: {:?}", event);
+        debug!("event: {:?}", event);
 
         let reopen = match event.op {
             Ok(op) if !(notify::op::Op::WRITE | notify::op::Op::CLOSE_WRITE).contains(op) => {
-                eprintln!("Restarting watch");
+                info!("Restarting watch");
                 true
             }
             Err(e) => return Err(e.into()),
@@ -72,7 +73,7 @@ fn watch_log(filename: &Path, log_parser: &LogParser, data: Arc<Mutex<Data>>) ->
         // Check size
         let size = file.seek(SeekFrom::End(0))?;
         if size < offset {
-            eprintln!("Truncation detected ({} -> {})", offset, size);
+            info!("Truncation detected ({} -> {})", offset, size);
             offset = size;
         }
 
@@ -85,7 +86,7 @@ fn watch_log(filename: &Path, log_parser: &LogParser, data: Arc<Mutex<Data>>) ->
         let mut read_to = 0;
         while let Some(ln) = buffer[read_to..].find('\n') {
             let line = &buffer[read_to..read_to + ln];
-            eprintln!("line: {:?}", line);
+            debug!("line: {:?}", line);
             read_to += ln + 1;
 
             let values = log_parser.parse(line)?;
@@ -211,11 +212,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let parser = LogParser::from_format(matches.value_of("LOG_FORMAT").unwrap())?;
     let collector = LogCollector::new(parser, Path::new(matches.value_of_os("FILE").unwrap()).to_owned())?;
 
+    {
+        let level = log::LevelFilter::Info;
+        let mut logger_builder = env_logger::Builder::from_default_env();
+        logger_builder.filter(None, level);
+        logger_builder.init();
+    }
+
     let registry: &Registry = default_registry();
     registry.register(Box::new(collector)).expect("register collector");
 
     let addr = "127.0.0.1:9898".parse().unwrap();
-    eprintln!("Starting server at {}", addr);
+    info!("Starting server at {}", addr);
     Server::bind(&addr).serve(make_service_fn(|_| async {
         Ok::<_, hyper::Error>(service_fn(serve_req))
     })).await?;
