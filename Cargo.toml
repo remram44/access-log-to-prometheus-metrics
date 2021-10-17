@@ -16,6 +16,9 @@ notify = "4"
 prometheus = { version = "0.13", default-features = false }
 tokio = { version = "1.0", features = ["macros", "rt"] }
 
+[features]
+process = ["prometheus/process"]
+
 [profile.release]
 lto = true
 opt-level = "s"
