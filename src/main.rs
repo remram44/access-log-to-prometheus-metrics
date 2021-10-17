@@ -206,6 +206,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("The nginx log_format setting")
                 .required(true)
                 .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("bind")
+                .long("bind")
+                .short("b")
+                .help("The address:port to listen on")
+                .required(false)
+                .takes_value(true)
+                .default_value("127.0.0.1:9898")
         );
     let matches = cli.get_matches();
 
@@ -222,7 +231,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry: &Registry = default_registry();
     registry.register(Box::new(collector)).expect("register collector");
 
-    let addr = "127.0.0.1:9898".parse().unwrap();
+    let addr = match matches.value_of("bind").unwrap().parse() {
+        Ok(a) => a,
+        Err(_) => {
+            eprintln!("Invalid address: use ip:port format, for example 127.0.0.1:9898");
+            std::process::exit(1);
+        }
+    };
     info!("Starting server at {}", addr);
     Server::bind(&addr).serve(make_service_fn(|_| async {
         Ok::<_, hyper::Error>(service_fn(serve_req))
