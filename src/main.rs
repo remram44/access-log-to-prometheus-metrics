@@ -4,10 +4,10 @@ use clap::{App, Arg};
 use hyper::header::CONTENT_TYPE;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Request, Response, Server};
-use log::{debug, info};
+use log::{debug, info, warn};
 use notify::{RecommendedWatcher, Watcher};
 use prometheus::{Encoder, Registry, TextEncoder, default_registry, gather};
-use prometheus::{IntCounterVec, Opts};
+use prometheus::{IntCounter, IntCounterVec, Opts};
 use prometheus::core::{Collector, Desc};
 use prometheus::proto::MetricFamily;
 use std::borrow::Cow::*;
@@ -25,6 +25,7 @@ struct LogCollector {
 struct Data {
     active: bool,
     request_count: IntCounterVec,
+    error_count: IntCounter,
 }
 
 fn watch_log(filename: &Path, log_parser: &LogParser, data: &Mutex<Data>) -> Result<(), Box<dyn std::error::Error>> {
@@ -89,7 +90,14 @@ fn watch_log(filename: &Path, log_parser: &LogParser, data: &Mutex<Data>) -> Res
             debug!("line: {:?}", line);
             read_to += ln + 1;
 
-            let values = log_parser.parse(line)?;
+            let values = match log_parser.parse(line) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("{}", e);
+                    data.lock().unwrap().error_count.inc();
+                    continue;
+                },
+            };
             let mut remote_user = None;
             let mut status = None;
             let mut vhost: Option<String> = None;
@@ -124,8 +132,11 @@ impl LogCollector {
                 Opts::new("requests", "The total number of requests per HTTP status code and virtual host name"),
                 &["status", "vhost"],
             ).unwrap(),
+            error_count: IntCounter::new("errors", "The total number of log lines that failed parsing").unwrap(),
         };
-        let desc = data.request_count.desc().iter().cloned().cloned().collect();
+        let mut desc: Vec<Desc> = Vec::new();
+        desc.extend(data.request_count.desc().into_iter().cloned());
+        desc.extend(data.error_count.desc().into_iter().cloned());
 
         let data = Arc::new(Mutex::new(data));
 
@@ -160,7 +171,10 @@ impl Collector for LogCollector {
     fn collect(&self) -> Vec<MetricFamily> {
         let data = self.data.lock().unwrap();
         if data.active {
-            data.request_count.collect()
+            let mut metrics = Vec::new();
+            metrics.extend(data.request_count.collect());
+            metrics.extend(data.error_count.collect());
+            metrics
         } else {
             Vec::new()
         }
