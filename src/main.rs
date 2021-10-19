@@ -27,7 +27,7 @@ struct Data {
     request_count: IntCounterVec,
 }
 
-fn watch_log(filename: &Path, log_parser: &LogParser, data: Arc<Mutex<Data>>) -> Result<(), Box<dyn std::error::Error>> {
+fn watch_log(filename: &Path, log_parser: &LogParser, data: &Mutex<Data>) -> Result<(), Box<dyn std::error::Error>> {
     let mut file = match std::fs::OpenOptions::new().read(true).open(&filename) {
         Ok(f) => f,
         Err(e) => {
@@ -131,8 +131,10 @@ impl LogCollector {
 
         let data_rc = data.clone();
         std::thread::spawn(move || {
+            let data: &Mutex<Data> = &data_rc;
+
             loop {
-                match watch_log(&filename, &log_parser, data_rc.clone()) {
+                match watch_log(&filename, &log_parser, data) {
                     Ok(()) => {}
                     Err(e) => {
                         eprintln!("{}", e);
