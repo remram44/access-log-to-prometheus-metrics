@@ -2,6 +2,7 @@
 name = "access-log-to-prometheus-metrics"
 version = "0.1.0"
 edition = "2018"
+rust-version = "1.46"
 authors = ["Remi Rampin <remi@rampin.org>"]
 description = "Exports Prometheus metrics by reading a log stream"
 repository = "https://github.com/remram44/access-log-to-prometheus-metrics"
