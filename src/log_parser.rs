@@ -156,7 +156,7 @@ impl<'a> LogParserInner<'a> {
                             self.values.push(LogValue::Duration(seconds));
                         }
                         LogField::Host => self.values.push(LogValue::Host(value)),
-                        LogField::BodyBytesSent => self.values.push(LogValue::BodyBytesSent(value.parse().map_err(|_| ParseError("Invalid status code".to_owned()))?)),
+                        LogField::BodyBytesSent => self.values.push(LogValue::BodyBytesSent(value.parse().map_err(|_| ParseError("Invalid number of bytes".to_owned()))?)),
                         LogField::Other(ref s) => self.values.push(LogValue::Other(s.clone(), value)),
                     }
                 }
