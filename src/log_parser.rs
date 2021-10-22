@@ -36,16 +36,18 @@ enum LogField {
     Request,
     Status,
     Host,
+    Duration,
     BodyBytesSent,
     Other(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum LogValue {
     RemoteUser(String),
     Request(String),
     Status(u16),
     Host(String),
+    Duration(f32),
     BodyBytesSent(u64),
     Other(String, String),
 }
@@ -149,6 +151,10 @@ impl<'a> LogParserInner<'a> {
                         LogField::RemoteUser => self.values.push(LogValue::RemoteUser(value)),
                         LogField::Request => self.values.push(LogValue::Request(value)),
                         LogField::Status => self.values.push(LogValue::Status(value.parse().map_err(|_| ParseError("Invalid status code".to_owned()))?)),
+                        LogField::Duration => {
+                            let seconds: f32 = value.parse().map_err(|_| ParseError("Invalid duration".to_owned()))?;
+                            self.values.push(LogValue::Duration(seconds));
+                        }
                         LogField::Host => self.values.push(LogValue::Host(value)),
                         LogField::BodyBytesSent => self.values.push(LogValue::BodyBytesSent(value.parse().map_err(|_| ParseError("Invalid status code".to_owned()))?)),
                         LogField::Other(ref s) => self.values.push(LogValue::Other(s.clone(), value)),
@@ -233,6 +239,8 @@ impl<'a> LogFormatParser<'a> {
                     self.fields.push(LogToken::Field(LogField::Request));
                 } else if var == "status" {
                     self.fields.push(LogToken::Field(LogField::Status));
+                } else if var == "request_time" {
+                    self.fields.push(LogToken::Field(LogField::Duration));
                 } else if var == "host" {
                     self.fields.push(LogToken::Field(LogField::Host));
                 } else if var == "body_bytes_sent" {
@@ -351,10 +359,10 @@ fn test_parser() {
         LogToken::Str(r.to_owned())
     }
 
-    let parser = LogParser { fields: vec![Field(Other("remote_addr".to_owned())), s(" - "), Field(RemoteUser), s(" ["), Field(Other("time_local".to_owned())), s("]")] };
+    let parser = LogParser { fields: vec![Field(Other("remote_addr".to_owned())), s(" - "), Field(RemoteUser), s(" "), Field(Duration), s(" ["), Field(Other("time_local".to_owned())), s("]")] };
 
     assert_eq!(
-        parser.parse("216.165.95.86 - remi [15/Oct/2021:15:39:52 +0000]").unwrap(),
-        vec![LogValue::Other("remote_addr".to_owned(), "216.165.95.86".to_owned()), LogValue::RemoteUser("remi".to_owned()), LogValue::Other("time_local".to_owned(), "15/Oct/2021:15:39:52 +0000".to_owned())],
+        parser.parse("216.165.95.86 - remi 0.012 [15/Oct/2021:15:39:52 +0000]").unwrap(),
+        vec![LogValue::Other("remote_addr".to_owned(), "216.165.95.86".to_owned()), LogValue::RemoteUser("remi".to_owned()), LogValue::Duration(0.012), LogValue::Other("time_local".to_owned(), "15/Oct/2021:15:39:52 +0000".to_owned())],
     );
 }

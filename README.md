@@ -36,16 +36,17 @@ The following variables are read:
 * The HTTP status code (`$status`), used as a label on the `requests` metric
 * The virtual host name (`$host`), used as a label on the `requests` metric
 * The presence of a user name, used as label on the `requests` metric (`yes`/`no`/`unk`)
+* The time to process the request (`$request_time`), used in the `request_duration` metric
 
 Metrics
 -------
 
 * `requests` is a counter for requests (e.g. log lines), organized by `status` (the HTTP status code) and `vhost` (the virtual host name)
+* `request_duration` is a histogram for request durations, organized by `status` (the HTTP status code) and `vhost` (the virtual host name)
 
 Labels default to the string "unk" if they are unknown (e.g. those variables are not present in your log format).
 
 Planned metrics
 ---------------
 
-* `request_time` histogram for the time taken to reply (`$request_time`)
 * `body_sent_bytes` histogram for the size of responses' bodies (`$body_bytes_sent`)

@@ -7,7 +7,7 @@ use hyper::{Body, Request, Response, Server};
 use log::{debug, info, warn};
 use notify::{RecommendedWatcher, Watcher};
 use prometheus::{Encoder, Registry, TextEncoder, default_registry, gather};
-use prometheus::{IntCounter, IntCounterVec, Opts};
+use prometheus::{HistogramOpts, HistogramVec, IntCounter, IntCounterVec, Opts};
 use prometheus::core::{Collector, Desc};
 use prometheus::proto::MetricFamily;
 use std::borrow::Cow::*;
@@ -25,6 +25,7 @@ struct LogCollector {
 struct Data {
     active: bool,
     request_count: IntCounterVec,
+    request_duration: HistogramVec,
     error_count: IntCounter,
 }
 
@@ -101,6 +102,7 @@ fn watch_log(filename: &Path, log_parser: &LogParser, data: &Mutex<Data>) -> Res
             let mut remote_user = None;
             let mut status = None;
             let mut vhost: Option<String> = None;
+            let mut duration = None;
             for value in values {
                 match value {
                     LogValue::RemoteUser(s) => {
@@ -112,6 +114,7 @@ fn watch_log(filename: &Path, log_parser: &LogParser, data: &Mutex<Data>) -> Res
                     }
                     LogValue::Request(_) => {}
                     LogValue::Status(i) => status = Some(i),
+                    LogValue::Duration(f) => duration = Some(f),
                     LogValue::Host(s) => vhost = Some(s),
                     LogValue::BodyBytesSent(_) => {}
                     LogValue::Other(_, _) => {}
@@ -119,7 +122,7 @@ fn watch_log(filename: &Path, log_parser: &LogParser, data: &Mutex<Data>) -> Res
             }
 
             let data = data.lock().unwrap();
-            data.request_count.with_label_values(&[
+            let label_values: &[&str] = &[
                 &status.map(|i| Owned(format!("{}", i))).unwrap_or(Borrowed("unk")),
                 vhost.as_ref().map(|s| -> &str { s }).unwrap_or("unk"),
                 match remote_user {
@@ -127,7 +130,11 @@ fn watch_log(filename: &Path, log_parser: &LogParser, data: &Mutex<Data>) -> Res
                     Some(None) => "no",
                     None => "unk",
                 },
-            ]).inc();
+            ];
+            data.request_count.with_label_values(label_values).inc();
+            if let Some(d) = duration {
+                data.request_duration.with_label_values(label_values).observe(d.into());
+            }
         }
 
         // Discard the lines from the buffer
@@ -143,10 +150,15 @@ impl LogCollector {
                 Opts::new("requests", "The total number of requests per HTTP status code and virtual host name"),
                 &["status", "vhost", "user"],
             ).unwrap(),
+            request_duration: HistogramVec::new(
+                HistogramOpts::new("request_duration", "Duration of HTTP requests in seconds per HTTP status code and virtual host name"),
+                &["status", "vhost", "user"],
+            ).unwrap(),
             error_count: IntCounter::new("errors", "The total number of log lines that failed parsing").unwrap(),
         };
         let mut desc: Vec<Desc> = Vec::new();
         desc.extend(data.request_count.desc().into_iter().cloned());
+        desc.extend(data.request_duration.desc().into_iter().cloned());
         desc.extend(data.error_count.desc().into_iter().cloned());
 
         let data = Arc::new(Mutex::new(data));
@@ -184,6 +196,7 @@ impl Collector for LogCollector {
         if data.active {
             let mut metrics = Vec::new();
             metrics.extend(data.request_count.collect());
+            metrics.extend(data.request_duration.collect());
             metrics.extend(data.error_count.collect());
             metrics
         } else {
