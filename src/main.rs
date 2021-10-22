@@ -26,6 +26,7 @@ struct Data {
     active: bool,
     request_count: IntCounterVec,
     request_duration: HistogramVec,
+    response_body_size: HistogramVec,
     error_count: IntCounter,
 }
 
@@ -103,6 +104,7 @@ fn watch_log(filename: &Path, log_parser: &LogParser, data: &Mutex<Data>) -> Res
             let mut status = None;
             let mut vhost: Option<String> = None;
             let mut duration = None;
+            let mut response_body_size = None;
             for value in values {
                 match value {
                     LogValue::RemoteUser(s) => {
@@ -116,7 +118,7 @@ fn watch_log(filename: &Path, log_parser: &LogParser, data: &Mutex<Data>) -> Res
                     LogValue::Status(i) => status = Some(i),
                     LogValue::Duration(f) => duration = Some(f),
                     LogValue::Host(s) => vhost = Some(s),
-                    LogValue::BodyBytesSent(_) => {}
+                    LogValue::BodyBytesSent(i) => response_body_size = Some(i),
                     LogValue::Other(_, _) => {}
                 }
             }
@@ -134,6 +136,9 @@ fn watch_log(filename: &Path, log_parser: &LogParser, data: &Mutex<Data>) -> Res
             data.request_count.with_label_values(label_values).inc();
             if let Some(d) = duration {
                 data.request_duration.with_label_values(label_values).observe(d.into());
+            }
+            if let Some(s) = response_body_size {
+                data.response_body_size.with_label_values(label_values).observe(s as f64);
             }
         }
 
@@ -154,11 +159,16 @@ impl LogCollector {
                 HistogramOpts::new("request_duration", "Duration of HTTP requests in seconds per HTTP status code and virtual host name"),
                 &["status", "vhost", "user"],
             ).unwrap(),
+            response_body_size: HistogramVec::new(
+                HistogramOpts::new("response_body_size", "Size of responses' bodies in bytes HTTP status code and virtual host name"),
+                &["status", "vhost", "user"],
+            ).unwrap(),
             error_count: IntCounter::new("errors", "The total number of log lines that failed parsing").unwrap(),
         };
         let mut desc: Vec<Desc> = Vec::new();
         desc.extend(data.request_count.desc().into_iter().cloned());
         desc.extend(data.request_duration.desc().into_iter().cloned());
+        desc.extend(data.response_body_size.desc().into_iter().cloned());
         desc.extend(data.error_count.desc().into_iter().cloned());
 
         let data = Arc::new(Mutex::new(data));
@@ -197,6 +207,7 @@ impl Collector for LogCollector {
             let mut metrics = Vec::new();
             metrics.extend(data.request_count.collect());
             metrics.extend(data.request_duration.collect());
+            metrics.extend(data.response_body_size.collect());
             metrics.extend(data.error_count.collect());
             metrics
         } else {
