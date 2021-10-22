@@ -160,7 +160,8 @@ impl LogCollector {
                 &["status", "vhost", "user"],
             ).unwrap(),
             response_body_size: HistogramVec::new(
-                HistogramOpts::new("response_body_size", "Size of responses' bodies in bytes HTTP status code and virtual host name"),
+                HistogramOpts::new("response_body_size", "Size of responses' bodies in bytes HTTP status code and virtual host name")
+                .buckets(prometheus::exponential_buckets(100.0, 5.0, 10).unwrap()),
                 &["status", "vhost", "user"],
             ).unwrap(),
             error_count: IntCounter::new("errors", "The total number of log lines that failed parsing").unwrap(),
