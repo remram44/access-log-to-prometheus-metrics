@@ -10,7 +10,7 @@ This tool attaches to the log file (like `tail -f` does) and exposes metrics for
 Project status
 --------------
 
-More metrics to come, but this is ready for production use.
+This is ready for production use, and deployed to my personal server which hosts multiple services.
 
 How to use
 ----------
