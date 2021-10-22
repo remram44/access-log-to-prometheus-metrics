@@ -35,6 +35,7 @@ The following variables are read:
 
 * The HTTP status code (`$status`), used as a label on the `requests` metric
 * The virtual host name (`$host`), used as a label on the `requests` metric
+* The presence of a user name, used as label on the `requests` metric (`yes`/`no`/`unk`)
 
 Metrics
 -------

@@ -103,7 +103,13 @@ fn watch_log(filename: &Path, log_parser: &LogParser, data: &Mutex<Data>) -> Res
             let mut vhost: Option<String> = None;
             for value in values {
                 match value {
-                    LogValue::RemoteUser(s) => remote_user = Some(s),
+                    LogValue::RemoteUser(s) => {
+                        if s != "-" {
+                            remote_user = Some(Some(s));
+                        } else {
+                            remote_user = Some(None);
+                        }
+                    }
                     LogValue::Request(_) => {}
                     LogValue::Status(i) => status = Some(i),
                     LogValue::Host(s) => vhost = Some(s),
@@ -116,6 +122,11 @@ fn watch_log(filename: &Path, log_parser: &LogParser, data: &Mutex<Data>) -> Res
             data.request_count.with_label_values(&[
                 &status.map(|i| Owned(format!("{}", i))).unwrap_or(Borrowed("unk")),
                 vhost.as_ref().map(|s| -> &str { s }).unwrap_or("unk"),
+                match remote_user {
+                    Some(Some(_)) => "yes",
+                    Some(None) => "no",
+                    None => "unk",
+                },
             ]).inc();
         }
 
@@ -130,7 +141,7 @@ impl LogCollector {
             active: false,
             request_count: IntCounterVec::new(
                 Opts::new("requests", "The total number of requests per HTTP status code and virtual host name"),
-                &["status", "vhost"],
+                &["status", "vhost", "user"],
             ).unwrap(),
             error_count: IntCounter::new("errors", "The total number of log lines that failed parsing").unwrap(),
         };
