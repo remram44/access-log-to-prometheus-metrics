@@ -7,6 +7,8 @@ However nearly all web servers are configured to log all requests to a file.
 
 This tool attaches to the log file (like `tail -f` does) and exposes metrics for Prometheus.
 
+![screenshot from Grafana](screenshot.png)
+
 Project status
 --------------
 
