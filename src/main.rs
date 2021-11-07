@@ -235,13 +235,6 @@ async fn serve_req(_req: Request<Body>) -> Result<Response<Body>, hyper::Error> 
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Standard log format:
-    // log_format combined '$remote_addr - $remote_user [$time_local] '
-    //                     '"$request" $status $body_bytes_sent '
-    //                     '"$http_referer" "$http_user_agent"';
-    // With host:
-    // $host ...
-    // app.taguette.org 216.165.95.135 - - [14/Oct/2021:19:51:30 +0000] "GET /api/project/32/events HTTP/2.0" 200 0 "https://app.taguette.org/project/32" "Firefox/93.0"
     let cli = App::new("access-log-to-prometheus-metrics")
         .bin_name("access-log-to-prometheus-metrics")
         .version(env!("CARGO_PKG_VERSION"))
