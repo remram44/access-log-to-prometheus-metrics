@@ -15,7 +15,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use log_parser::{LogValue, LogParser};
+use log_parser::{LogValue, LogParser, ParseError};
 
 struct LogCollector {
     data: Arc<Mutex<Data>>,
@@ -92,59 +92,74 @@ fn watch_log(filename: &Path, log_parser: &LogParser, data: &Mutex<Data>) -> Res
             debug!("line: {:?}", line);
             read_to += ln + 1;
 
+            let mut data = data.lock().unwrap();
+
             let values = match log_parser.parse(line) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!("{}", e);
-                    data.lock().unwrap().error_count.inc();
+                    data.error_count.inc();
                     continue;
                 },
             };
-            let mut remote_user = None;
-            let mut status = None;
-            let mut vhost: Option<String> = None;
-            let mut duration = None;
-            let mut response_body_size = None;
-            for value in values {
-                match value {
-                    LogValue::RemoteUser(s) => {
-                        if s != "-" {
-                            remote_user = Some(Some(s));
-                        } else {
-                            remote_user = Some(None);
-                        }
-                    }
-                    LogValue::Request(_) => {}
-                    LogValue::Status(i) => status = Some(i),
-                    LogValue::Duration(f) => duration = Some(f),
-                    LogValue::Host(s) => vhost = Some(s),
-                    LogValue::BodyBytesSent(i) => response_body_size = Some(i),
-                    LogValue::Other(_, _) => {}
+            match process_line(&mut data, values) {
+                Ok(()) => {}
+                Err(e) => {
+                    warn!("{}", e);
+                    data.error_count.inc();
+                    continue;
                 }
-            }
-
-            let data = data.lock().unwrap();
-            let label_values: &[&str] = &[
-                &status.map(|i| Owned(format!("{}", i))).unwrap_or(Borrowed("unk")),
-                vhost.as_ref().map(|s| -> &str { s }).unwrap_or("unk"),
-                match remote_user {
-                    Some(Some(_)) => "yes",
-                    Some(None) => "no",
-                    None => "unk",
-                },
-            ];
-            data.request_count.with_label_values(label_values).inc();
-            if let Some(d) = duration {
-                data.request_duration.with_label_values(label_values).observe(d.into());
-            }
-            if let Some(s) = response_body_size {
-                data.response_body_size.with_label_values(label_values).observe(s as f64);
-            }
+            };
         }
 
         // Discard the lines from the buffer
         buffer.drain(0..read_to);
     }
+}
+
+fn process_line(data: &mut Data, values: Vec<LogValue>) -> Result<(), ParseError> {
+    let mut remote_user = None;
+    let mut status: Option<u16> = None;
+    let mut vhost: Option<&str> = None;
+    let mut duration = None;
+    let mut response_body_size: Option<u64> = None;
+    for value in values {
+        let LogValue { variable, value } = value;
+        if variable == "remote_user" {
+            if value != "-" {
+                remote_user = Some(Some(value));
+            } else {
+                remote_user = Some(None);
+            }
+        } else if variable == "status" {
+            status = Some(value.parse().map_err(|_| ParseError("Invalid status code".to_owned()))?);
+        } else if variable == "request_time" {
+            let seconds: f32 = value.parse().map_err(|_| ParseError("Invalid duration".to_owned()))?;
+            duration = Some(seconds);
+        } else if variable == "host" {
+            vhost = Some(value);
+        } else if variable == "body_bytes_sent" {
+            response_body_size = Some(value.parse().map_err(|_| ParseError("Invalid number of bytes".to_owned()))?);
+        }
+    }
+
+    let label_values: &[&str] = &[
+        &status.map(|i| Owned(format!("{}", i))).unwrap_or(Borrowed("unk")),
+        vhost.as_ref().map(|s| -> &str { s }).unwrap_or("unk"),
+        match remote_user {
+            Some(Some(_)) => "yes",
+            Some(None) => "no",
+            None => "unk",
+        },
+    ];
+    data.request_count.with_label_values(label_values).inc();
+    if let Some(d) = duration {
+        data.request_duration.with_label_values(label_values).observe(d.into());
+    }
+    if let Some(s) = response_body_size {
+        data.response_body_size.with_label_values(label_values).observe(s as f64);
+    }
+    Ok(())
 }
 
 impl LogCollector {
