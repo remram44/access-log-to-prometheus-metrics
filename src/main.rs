@@ -252,6 +252,15 @@ async fn serve_req(_req: Request<Body>) -> Result<Response<Body>, hyper::Error> 
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // End the process if any thread panics
+    // https://stackoverflow.com/a/36031130
+    let orig_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        // invoke the default handler and exit the process
+        orig_hook(panic_info);
+        std::process::exit(1);
+    }));
+
     let cli = App::new("access-log-to-prometheus-metrics")
         .bin_name("access-log-to-prometheus-metrics")
         .version(env!("CARGO_PKG_VERSION"))
