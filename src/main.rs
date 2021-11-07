@@ -18,11 +18,11 @@ use std::sync::{Arc, Mutex};
 use log_parser::{LogValue, LogParser, ParseError};
 
 struct LogCollector {
-    data: Arc<Mutex<Data>>,
+    data: Arc<Mutex<LogData>>,
     desc: Vec<Desc>,
 }
 
-struct Data {
+struct LogData {
     active: bool,
     request_count: IntCounterVec,
     request_duration: HistogramVec,
@@ -30,141 +30,143 @@ struct Data {
     error_count: IntCounter,
 }
 
-fn watch_log(filename: &Path, log_parser: &LogParser, data: &Mutex<Data>) -> Result<(), Box<dyn std::error::Error>> {
-    let mut file = match std::fs::OpenOptions::new().read(true).open(&filename) {
-        Ok(f) => f,
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                info!("File is missing, retrying...");
-                return Ok(());
-            } else {
-                return Err(e.into());
+impl LogData {
+    fn watch_log(filename: &Path, log_parser: &LogParser, data: &Mutex<LogData>) -> Result<(), Box<dyn std::error::Error>> {
+        let mut file = match std::fs::OpenOptions::new().read(true).open(&filename) {
+            Ok(f) => f,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    info!("File is missing, retrying...");
+                    return Ok(());
+                } else {
+                    return Err(e.into());
+                }
             }
-        }
-    };
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    let mut watcher: RecommendedWatcher = RecommendedWatcher::new_raw(tx)?;
-    watcher.watch(&filename, notify::RecursiveMode::NonRecursive)?;
-    let mut offset = file.seek(SeekFrom::End(0))?;
-
-    data.lock().unwrap().active = true;
-    info!("Watch established");
-
-    let mut buffer = String::new();
-
-    // Wait for events
-    loop {
-        let event: notify::RawEvent = rx.recv()?;
-
-        debug!("event: {:?}", event);
-
-        let reopen = match event.op {
-            Ok(op) if !(notify::op::Op::WRITE | notify::op::Op::CLOSE_WRITE).contains(op) => {
-                info!("Restarting watch");
-                true
-            }
-            Err(e) => return Err(e.into()),
-            _ => false,
         };
 
-        if reopen {
-            data.lock().unwrap().active = false;
-            return Ok(());
-        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watcher: RecommendedWatcher = RecommendedWatcher::new_raw(tx)?;
+        watcher.watch(&filename, notify::RecursiveMode::NonRecursive)?;
+        let mut offset = file.seek(SeekFrom::End(0))?;
 
-        // Check size
-        let size = file.seek(SeekFrom::End(0))?;
-        if size < offset {
-            info!("Truncation detected ({} -> {})", offset, size);
-            offset = size;
-        }
+        data.lock().unwrap().active = true;
+        info!("Watch established");
 
-        // Read
-        file.seek(SeekFrom::Start(offset))?;
-        let res = file.read_to_string(&mut buffer)? as u64;
-        offset += res;
+        let mut buffer = String::new();
 
-        // Split into lines
-        let mut read_to = 0;
-        while let Some(ln) = buffer[read_to..].find('\n') {
-            let line = &buffer[read_to..read_to + ln];
-            debug!("line: {:?}", line);
-            read_to += ln + 1;
+        // Wait for events
+        loop {
+            let event: notify::RawEvent = rx.recv()?;
 
-            let mut data = data.lock().unwrap();
+            debug!("event: {:?}", event);
 
-            let values = match log_parser.parse(line) {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!("{}", e);
-                    data.error_count.inc();
-                    continue;
-                },
-            };
-            match process_line(&mut data, values) {
-                Ok(()) => {}
-                Err(e) => {
-                    warn!("{}", e);
-                    data.error_count.inc();
-                    continue;
+            let reopen = match event.op {
+                Ok(op) if !(notify::op::Op::WRITE | notify::op::Op::CLOSE_WRITE).contains(op) => {
+                    info!("Restarting watch");
+                    true
                 }
+                Err(e) => return Err(e.into()),
+                _ => false,
             };
-        }
 
-        // Discard the lines from the buffer
-        buffer.drain(0..read_to);
-    }
-}
-
-fn process_line(data: &mut Data, values: Vec<LogValue>) -> Result<(), ParseError> {
-    let mut remote_user = None;
-    let mut status: Option<u16> = None;
-    let mut vhost: Option<&str> = None;
-    let mut duration = None;
-    let mut response_body_size: Option<u64> = None;
-    for value in values {
-        let LogValue { variable, value } = value;
-        if variable == "remote_user" {
-            if value != "-" {
-                remote_user = Some(Some(value));
-            } else {
-                remote_user = Some(None);
+            if reopen {
+                data.lock().unwrap().active = false;
+                return Ok(());
             }
-        } else if variable == "status" {
-            status = Some(value.parse().map_err(|_| ParseError("Invalid status code".to_owned()))?);
-        } else if variable == "request_time" {
-            let seconds: f32 = value.parse().map_err(|_| ParseError("Invalid duration".to_owned()))?;
-            duration = Some(seconds);
-        } else if variable == "host" {
-            vhost = Some(value);
-        } else if variable == "body_bytes_sent" {
-            response_body_size = Some(value.parse().map_err(|_| ParseError("Invalid number of bytes".to_owned()))?);
+
+            // Check size
+            let size = file.seek(SeekFrom::End(0))?;
+            if size < offset {
+                info!("Truncation detected ({} -> {})", offset, size);
+                offset = size;
+            }
+
+            // Read
+            file.seek(SeekFrom::Start(offset))?;
+            let res = file.read_to_string(&mut buffer)? as u64;
+            offset += res;
+
+            // Split into lines
+            let mut read_to = 0;
+            while let Some(ln) = buffer[read_to..].find('\n') {
+                let line = &buffer[read_to..read_to + ln];
+                debug!("line: {:?}", line);
+                read_to += ln + 1;
+
+                let mut data = data.lock().unwrap();
+
+                let values = match log_parser.parse(line) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!("{}", e);
+                        data.error_count.inc();
+                        continue;
+                    },
+                };
+                match data.process_line(values) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        warn!("{}", e);
+                        data.error_count.inc();
+                        continue;
+                    }
+                };
+            }
+
+            // Discard the lines from the buffer
+            buffer.drain(0..read_to);
         }
     }
 
-    let label_values: &[&str] = &[
-        &status.map(|i| Owned(format!("{}", i))).unwrap_or(Borrowed("unk")),
-        vhost.as_ref().map(|s| -> &str { s }).unwrap_or("unk"),
-        match remote_user {
-            Some(Some(_)) => "yes",
-            Some(None) => "no",
-            None => "unk",
-        },
-    ];
-    data.request_count.with_label_values(label_values).inc();
-    if let Some(d) = duration {
-        data.request_duration.with_label_values(label_values).observe(d.into());
+    fn process_line(&mut self, values: Vec<LogValue>) -> Result<(), ParseError> {
+        let mut remote_user = None;
+        let mut status: Option<u16> = None;
+        let mut vhost: Option<&str> = None;
+        let mut duration = None;
+        let mut response_body_size: Option<u64> = None;
+        for value in values {
+            let LogValue { variable, value } = value;
+            if variable == "remote_user" {
+                if value != "-" {
+                    remote_user = Some(Some(value));
+                } else {
+                    remote_user = Some(None);
+                }
+            } else if variable == "status" {
+                status = Some(value.parse().map_err(|_| ParseError("Invalid status code".to_owned()))?);
+            } else if variable == "request_time" {
+                let seconds: f32 = value.parse().map_err(|_| ParseError("Invalid duration".to_owned()))?;
+                duration = Some(seconds);
+            } else if variable == "host" {
+                vhost = Some(value);
+            } else if variable == "body_bytes_sent" {
+                response_body_size = Some(value.parse().map_err(|_| ParseError("Invalid number of bytes".to_owned()))?);
+            }
+        }
+
+        let label_values: &[&str] = &[
+            &status.map(|i| Owned(format!("{}", i))).unwrap_or(Borrowed("unk")),
+            vhost.as_ref().map(|s| -> &str { s }).unwrap_or("unk"),
+            match remote_user {
+                Some(Some(_)) => "yes",
+                Some(None) => "no",
+                None => "unk",
+            },
+        ];
+        self.request_count.with_label_values(label_values).inc();
+        if let Some(d) = duration {
+            self.request_duration.with_label_values(label_values).observe(d.into());
+        }
+        if let Some(s) = response_body_size {
+            self.response_body_size.with_label_values(label_values).observe(s as f64);
+        }
+        Ok(())
     }
-    if let Some(s) = response_body_size {
-        data.response_body_size.with_label_values(label_values).observe(s as f64);
-    }
-    Ok(())
 }
 
 impl LogCollector {
     fn new(log_parser: LogParser, filename: PathBuf) -> Result<LogCollector, notify::Error> {
-        let data = Data {
+        let data = LogData {
             active: false,
             request_count: IntCounterVec::new(
                 Opts::new("requests", "The total number of requests per HTTP status code and virtual host name"),
@@ -191,10 +193,10 @@ impl LogCollector {
 
         let data_rc = data.clone();
         std::thread::spawn(move || {
-            let data: &Mutex<Data> = &data_rc;
+            let data: &Mutex<LogData> = &data_rc;
 
             loop {
-                match watch_log(&filename, &log_parser, data) {
+                match LogData::watch_log(&filename, &log_parser, data) {
                     Ok(()) => {}
                     Err(e) => {
                         eprintln!("{}", e);
