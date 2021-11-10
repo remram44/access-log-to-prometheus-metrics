@@ -15,10 +15,12 @@ hyper = { version = "0.14", features = ["server", "http1", "tcp"] }
 log = "0.4"
 notify = "4"
 prometheus = { version = "0.13", default-features = false }
+regex = { version = "1", optional = true }
 tokio = { version = "1.0", features = ["macros", "rt"] }
 
 [features]
 process = ["prometheus/process"]
+re = ["regex"]
 
 [profile.release]
 lto = true

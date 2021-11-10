@@ -24,11 +24,19 @@ struct Filter {
 }
 
 enum FilterFunc {
+    #[cfg(feature = "re")]
+    Regex {
+        regex: regex::Regex,
+    },
 }
 
 impl Filter {
     fn filter(&self, value: &str) -> bool {
         match &self.func {
+            #[cfg(feature = "re")]
+            FilterFunc::Regex { regex } => {
+                regex.is_match(value)
+            }
             // Can't happen, but "references are always considered inhabited"
             #[allow(unreachable_patterns)]
             _ => true,
@@ -48,6 +56,11 @@ enum ExtractorFunc {
     Duration,
     Host,
     ResponseBodySize,
+    #[cfg(feature = "re")]
+    Regex {
+        target: String,
+        regex: regex::Regex,
+    }
 }
 
 impl Extractor {
@@ -81,6 +94,11 @@ impl Extractor {
             ExtractorFunc::ResponseBodySize => {
                 let size = value.parse().map_err(|_| ParseError("Invalid number of bytes".to_owned()))?;
                 *response_body_size = Some(size);
+            }
+            #[cfg(feature = "re")]
+            ExtractorFunc::Regex { ref target, ref regex } => {
+                let target_value = regex.replace(value, target);
+                set_label(target_value);
             }
         }
 
@@ -471,6 +489,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .required(false)
                 .takes_value(true)
                 .default_value("127.0.0.1:9898")
+        )
+        .arg(
+            Arg::with_name("match")
+                .long("match")
+                .short("m")
+                .help("Only lines where <field> matches <regex>")
+                .required(false)
+                .multiple(true)
+                .takes_value(true)
+                .number_of_values(1)
+        )
+        .arg(
+            Arg::with_name("label")
+                .long("label")
+                .short("l")
+                .help("Set <label> to <value> from <field> with <regex>")
+                .required(false)
+                .multiple(true)
+                .takes_value(true)
+                .number_of_values(1)
         );
     let matches = cli.get_matches();
 
@@ -481,6 +519,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let parser = LogParser::from_format(matches.value_of("LOG_FORMAT").unwrap())?;
     let collector = LogCollectorBuilder::new(parser, Path::new(matches.value_of_os("FILE").unwrap()).to_owned());
+
+    #[cfg(feature = "re")]
+    let collector = {
+        let mut collector = collector;
+
+        if let Some(v) = matches.values_of("match") {
+            for s in v {
+                let parts: Vec<&str> = s.splitn(2, ':').collect();
+                if parts.len() != 2 {
+                    eprintln!("--match needs 2 arguments separated by ':'");
+                    std::process::exit(1);
+                }
+                if let Err(()) = collector.add_filter(
+                    parts[0].to_owned(),
+                    FilterFunc::Regex { regex: regex::Regex::new(parts[1])? },
+                ) {
+                    eprintln!("No field {:?}, can't add filter", parts[0]);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        if let Some(v) = matches.values_of("label") {
+            for s in v {
+                let parts: Vec<&str> = s.splitn(4, ':').collect();
+                if parts.len() != 4 {
+                    eprintln!("--label needs 4 arguments separated by ':'");
+                    std::process::exit(1);
+                }
+                if let Err(()) = collector.add_extractor(
+                    Some(parts[0].to_owned()),
+                    parts[2].to_owned(),
+                    ExtractorFunc::Regex {
+                        target: parts[1].to_owned(),
+                        regex: regex::Regex::new(&format!("^.*{}.*$", parts[3]))?,
+                    },
+                ) {
+                    eprintln!("No field {:?}, can't add extractor", parts[2]);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        collector
+    };
+    #[cfg(not(feature = "re"))]
+    {
+        if let Some(mut v) = matches.values_of("match") {
+            if let Some(_) = v.next() {
+                eprintln!("Support for --match and --label was not compiled in");
+                std::process::exit(1);
+            }
+        }
+        if let Some(mut v) = matches.values_of("label") {
+            if let Some(_) = v.next() {
+                eprintln!("Support for --match and --label was not compiled in");
+                std::process::exit(1);
+            }
+        }
+    }
 
     let collector = collector.build()?;
 
