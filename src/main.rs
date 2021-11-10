@@ -270,15 +270,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     let matches = cli.get_matches();
 
-    let parser = LogParser::from_format(matches.value_of("LOG_FORMAT").unwrap())?;
-    let collector = LogCollector::new(parser, Path::new(matches.value_of_os("FILE").unwrap()).to_owned())?;
-
     {
-        let level = log::LevelFilter::Info;
         let mut logger_builder = env_logger::Builder::from_default_env();
-        logger_builder.filter(None, level);
         logger_builder.init();
     }
+
+    let parser = LogParser::from_format(matches.value_of("LOG_FORMAT").unwrap())?;
+    let collector = LogCollector::new(parser, Path::new(matches.value_of_os("FILE").unwrap()).to_owned())?;
 
     let registry: &Registry = default_registry();
     registry.register(Box::new(collector)).expect("register collector");
