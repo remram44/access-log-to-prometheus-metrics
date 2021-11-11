@@ -114,16 +114,35 @@ struct LogData {
     error_count: IntCounter,
 }
 
-impl LogData {
-    fn watch_log(
-        data: &Mutex<LogData>,
-        filename: &Path,
-        log_parser: &LogParser,
-        labels: &[String],
-        filters: &[Filter],
-        extractors: &[Extractor],
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut file = match std::fs::OpenOptions::new().read(true).open(&filename) {
+struct LogProcessor {
+    data: Arc<Mutex<LogData>>,
+    filename: PathBuf,
+    log_parser: LogParser,
+    labels: Vec<String>,
+    filters: Vec<Filter>,
+    extractors: Vec<Extractor>,
+}
+
+impl LogProcessor {
+    fn start_thread(self) {
+        std::thread::spawn(move || {
+            loop {
+                match self.watch_log() {
+                    Ok(()) => {}
+                    Err(e) => {
+                        eprintln!("{}", e);
+                        std::process::exit(1);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        });
+    }
+
+    fn watch_log(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let data: &Mutex<LogData> = &self.data;
+
+        let mut file = match std::fs::OpenOptions::new().read(true).open(&self.filename) {
             Ok(f) => f,
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
@@ -137,7 +156,7 @@ impl LogData {
 
         let (tx, rx) = std::sync::mpsc::channel();
         let mut watcher: RecommendedWatcher = RecommendedWatcher::new_raw(tx)?;
-        watcher.watch(&filename, notify::RecursiveMode::NonRecursive)?;
+        watcher.watch(&self.filename, notify::RecursiveMode::NonRecursive)?;
         let mut offset = file.seek(SeekFrom::End(0))?;
 
         data.lock().unwrap().active = true;
@@ -184,16 +203,36 @@ impl LogData {
                 debug!("line: {:?}", line);
                 read_to += ln + 1;
 
-                let mut data = data.lock().unwrap();
+                let data = data.lock().unwrap();
 
-                match data.process_line(log_parser, line, labels, filters, extractors) {
-                    Ok(()) => {}
+                let mut label_values = vec![Borrowed("unk"); self.labels.len()];
+                let mut duration: Option<f32> = None;
+                let mut response_body_size: Option<u64> = None;
+
+                match self.process_line(line, &mut label_values, &mut duration, &mut response_body_size) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
                     Err(e) => {
                         warn!("{}", e);
                         data.error_count.inc();
                         continue;
                     }
                 };
+
+                debug!("{}", line);
+                for (key, value) in self.labels.iter().zip(&label_values) {
+                    debug!("    {}: {}", key, value);
+                }
+
+                let label_refs: Vec<&str> = label_values.iter().map(|v| -> &str { &v }).collect();
+
+                data.request_count.with_label_values(&label_refs).inc();
+                if let Some(d) = duration {
+                    data.request_duration.with_label_values(&label_refs).observe(d.into());
+                }
+                if let Some(s) = response_body_size {
+                    data.response_body_size.with_label_values(&label_refs).observe(s as f64);
+                }
             }
 
             // Discard the lines from the buffer
@@ -201,22 +240,17 @@ impl LogData {
         }
     }
 
-    fn process_line(
-        &mut self,
-        log_parser: &LogParser,
-        line: &str,
-        labels: &[String],
-        filters: &[Filter],
-        extractors: &[Extractor],
-    ) -> Result<(), ParseError> {
-        let values = match log_parser.parse(line) {
+    fn process_line<'a>(
+        &'a self,
+        line: &'a str,
+        label_values: &mut [Cow<'a, str>],
+        duration: &mut Option<f32>,
+        response_body_size: &mut Option<u64>,
+    ) -> Result<bool, ParseError> {
+        let values = match self.log_parser.parse(line) {
             Ok(v) => v,
             Err(e) => return Err(e),
         };
-
-        let mut label_values = vec![Borrowed("unk"); labels.len()];
-        let mut duration: Option<f32> = None;
-        let mut response_body_size: Option<u64> = None;
 
         let mut extractor_index = 0;
         let mut filter_index = 0;
@@ -225,38 +259,24 @@ impl LogData {
             let LogValue { value, .. } = value;
 
             // Run filters
-            while filter_index < filters.len() && filters[filter_index].field_index == field_index {
-                if !filters[filter_index].filter(value) {
-                    debug!("Skipping because of filter on {}", &log_parser.fields()[field_index]);
-                    return Ok(());
+            while filter_index < self.filters.len() && self.filters[filter_index].field_index == field_index {
+                if !self.filters[filter_index].filter(value) {
+                    debug!("Skipping because of filter on {}", self.log_parser.fields()[field_index]);
+                    return Ok(false);
                 }
 
                 filter_index += 1;
             }
 
             // Run extractors
-            while extractor_index < extractors.len() && extractors[extractor_index].field_index == field_index {
-                extractors[extractor_index].extract(value, &mut label_values, &mut duration, &mut response_body_size)?;
+            while extractor_index < self.extractors.len() && self.extractors[extractor_index].field_index == field_index {
+                self.extractors[extractor_index].extract(value, label_values, duration, response_body_size)?;
 
                 extractor_index += 1;
             }
         }
 
-        debug!("{}", line);
-        for (key, value) in labels.iter().zip(&label_values) {
-            debug!("    {}: {}", key, value);
-        }
-
-        let label_refs: Vec<&str> = label_values.iter().map(|v| -> &str { &v }).collect();
-
-        self.request_count.with_label_values(&label_refs).inc();
-        if let Some(d) = duration {
-            self.request_duration.with_label_values(&label_refs).observe(d.into());
-        }
-        if let Some(s) = response_body_size {
-            self.response_body_size.with_label_values(&label_refs).observe(s as f64);
-        }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -358,6 +378,11 @@ impl LogCollectorBuilder {
         let labels = self.labels.clone();
         let label_refs: Vec<&str> = self.labels.iter().map(|v| -> &str { &v }).collect();
 
+        let mut filters = self.filters;
+        filters.sort_by(|a, b| a.field_index.cmp(&b.field_index));
+        let mut extractors = self.extractors;
+        extractors.sort_by(|a, b| a.field_index.cmp(&b.field_index));
+
         let data = LogData {
             active: false,
             request_count: IntCounterVec::new(
@@ -383,27 +408,15 @@ impl LogCollectorBuilder {
 
         let data = Arc::new(Mutex::new(data));
 
-        let filename = self.filename;
-        let log_parser = self.log_parser;
-        let mut filters = self.filters;
-        filters.sort_by(|a, b| a.field_index.cmp(&b.field_index));
-        let mut extractors = self.extractors;
-        extractors.sort_by(|a, b| a.field_index.cmp(&b.field_index));
-        let data_rc = data.clone();
-        std::thread::spawn(move || {
-            let data: &Mutex<LogData> = &data_rc;
-
-            loop {
-                match LogData::watch_log(data, &filename, &log_parser, &labels, &filters, &extractors) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        eprintln!("{}", e);
-                        std::process::exit(1);
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_secs(2));
-            }
-        });
+        let log_processor = LogProcessor {
+            data: data.clone(),
+            filename: self.filename,
+            log_parser: self.log_parser,
+            labels,
+            filters,
+            extractors,
+        };
+        log_processor.start_thread();
 
         Ok(LogCollector {
             desc,
