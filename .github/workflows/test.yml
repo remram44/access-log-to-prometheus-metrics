@@ -1,0 +1,30 @@
+name: Test
+
+on:
+  - push
+  - pull_request
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        rust-version: [1.56.0, stable, nightly]
+        include:
+        - os: macos-latest
+          rust-version: 1.56.0
+        - os: windows-latest
+          rust-version: 1.56.0
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Rust ${{ matrix.rust-version }}
+      uses: actions-rs/toolchain@v1
+      id: rustup
+      with:
+        toolchain: ${{ matrix.rust-version }}
+        override: true
+    - name: Run tests without 're'
+      run: cargo test --verbose
+    - name: Run tests with 're'
+      run: cargo test --verbose --features re
