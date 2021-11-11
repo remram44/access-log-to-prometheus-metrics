@@ -10,19 +10,103 @@ use prometheus::{Encoder, Registry, TextEncoder, default_registry, gather};
 use prometheus::{HistogramOpts, HistogramVec, IntCounter, IntCounterVec, Opts};
 use prometheus::core::{Collector, Desc};
 use prometheus::proto::MetricFamily;
+use std::borrow::Cow;
 use std::borrow::Cow::*;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use log_parser::{LogValue, LogParser};
+use log_parser::{LogValue, LogParser, ParseError};
 
-struct LogCollector {
-    data: Arc<Mutex<Data>>,
-    desc: Vec<Desc>,
+struct Filter {
+    field_index: usize,
+    func: FilterFunc,
 }
 
-struct Data {
+enum FilterFunc {
+    #[cfg(feature = "re")]
+    Regex {
+        regex: regex::Regex,
+    },
+}
+
+impl Filter {
+    fn filter(&self, value: &str) -> bool {
+        match &self.func {
+            #[cfg(feature = "re")]
+            FilterFunc::Regex { regex } => {
+                regex.is_match(value)
+            }
+            // Can't happen, but "references are always considered inhabited"
+            #[allow(unreachable_patterns)]
+            _ => true,
+        }
+    }
+}
+
+struct Extractor {
+    label: Option<(String, usize)>,
+    field_index: usize,
+    func: ExtractorFunc,
+}
+
+enum ExtractorFunc {
+    User,
+    Status,
+    Duration,
+    Host,
+    ResponseBodySize,
+    #[cfg(feature = "re")]
+    Regex {
+        target: String,
+        regex: regex::Regex,
+    }
+}
+
+impl Extractor {
+    fn extract<'a>(&'a self, value: &'a str, labels: &mut [Cow<'a, str>], duration: &mut Option<f32>, response_body_size: &mut Option<u64>) -> Result<(), ParseError> {
+        let mut set_label = |label: Cow<'a, str>| {
+            let label_index = match self.label {
+                Some((_, idx)) => idx,
+                None => panic!("Extractor with no target label tried to set a label"),
+            };
+            labels[label_index] = label;
+        };
+
+        match &self.func {
+            ExtractorFunc::User => {
+                if value != "-" {
+                    set_label(Borrowed("yes"))
+                } else {
+                    set_label(Borrowed("no"))
+                }
+            }
+            ExtractorFunc::Status => {
+                set_label(Owned(value.parse().map_err(|_| ParseError("Invalid status code".to_owned()))?))
+            }
+            ExtractorFunc::Duration => {
+                let seconds: f32 = value.parse().map_err(|_| ParseError("Invalid duration".to_owned()))?;
+                *duration = Some(seconds);
+            }
+            ExtractorFunc::Host => {
+                set_label(Borrowed(value));
+            }
+            ExtractorFunc::ResponseBodySize => {
+                let size = value.parse().map_err(|_| ParseError("Invalid number of bytes".to_owned()))?;
+                *response_body_size = Some(size);
+            }
+            #[cfg(feature = "re")]
+            ExtractorFunc::Regex { ref target, ref regex } => {
+                let target_value = regex.replace(value, target);
+                set_label(target_value);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+struct LogData {
     active: bool,
     request_count: IntCounterVec,
     request_duration: HistogramVec,
@@ -30,139 +114,264 @@ struct Data {
     error_count: IntCounter,
 }
 
-fn watch_log(filename: &Path, log_parser: &LogParser, data: &Mutex<Data>) -> Result<(), Box<dyn std::error::Error>> {
-    let mut file = match std::fs::OpenOptions::new().read(true).open(&filename) {
-        Ok(f) => f,
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                info!("File is missing, retrying...");
-                return Ok(());
-            } else {
-                return Err(e.into());
-            }
-        }
-    };
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    let mut watcher: RecommendedWatcher = RecommendedWatcher::new_raw(tx)?;
-    watcher.watch(&filename, notify::RecursiveMode::NonRecursive)?;
-    let mut offset = file.seek(SeekFrom::End(0))?;
-
-    data.lock().unwrap().active = true;
-    info!("Watch established");
-
-    let mut buffer = String::new();
-
-    // Wait for events
-    loop {
-        let event: notify::RawEvent = rx.recv()?;
-
-        debug!("event: {:?}", event);
-
-        let reopen = match event.op {
-            Ok(op) if !(notify::op::Op::WRITE | notify::op::Op::CLOSE_WRITE).contains(op) => {
-                info!("Restarting watch");
-                true
-            }
-            Err(e) => return Err(e.into()),
-            _ => false,
-        };
-
-        if reopen {
-            data.lock().unwrap().active = false;
-            return Ok(());
-        }
-
-        // Check size
-        let size = file.seek(SeekFrom::End(0))?;
-        if size < offset {
-            info!("Truncation detected ({} -> {})", offset, size);
-            offset = size;
-        }
-
-        // Read
-        file.seek(SeekFrom::Start(offset))?;
-        let res = file.read_to_string(&mut buffer)? as u64;
-        offset += res;
-
-        // Split into lines
-        let mut read_to = 0;
-        while let Some(ln) = buffer[read_to..].find('\n') {
-            let line = &buffer[read_to..read_to + ln];
-            debug!("line: {:?}", line);
-            read_to += ln + 1;
-
-            let values = match log_parser.parse(line) {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!("{}", e);
-                    data.lock().unwrap().error_count.inc();
-                    continue;
-                },
-            };
-            let mut remote_user = None;
-            let mut status = None;
-            let mut vhost: Option<String> = None;
-            let mut duration = None;
-            let mut response_body_size = None;
-            for value in values {
-                match value {
-                    LogValue::RemoteUser(s) => {
-                        if s != "-" {
-                            remote_user = Some(Some(s));
-                        } else {
-                            remote_user = Some(None);
-                        }
-                    }
-                    LogValue::Request(_) => {}
-                    LogValue::Status(i) => status = Some(i),
-                    LogValue::Duration(f) => duration = Some(f),
-                    LogValue::Host(s) => vhost = Some(s),
-                    LogValue::BodyBytesSent(i) => response_body_size = Some(i),
-                    LogValue::Other(_, _) => {}
+impl LogData {
+    fn watch_log(
+        data: &Mutex<LogData>,
+        filename: &Path,
+        log_parser: &LogParser,
+        labels: &[String],
+        filters: &[Filter],
+        extractors: &[Extractor],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut file = match std::fs::OpenOptions::new().read(true).open(&filename) {
+            Ok(f) => f,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    info!("File is missing, retrying...");
+                    return Ok(());
+                } else {
+                    return Err(e.into());
                 }
             }
+        };
 
-            let data = data.lock().unwrap();
-            let label_values: &[&str] = &[
-                &status.map(|i| Owned(format!("{}", i))).unwrap_or(Borrowed("unk")),
-                vhost.as_ref().map(|s| -> &str { s }).unwrap_or("unk"),
-                match remote_user {
-                    Some(Some(_)) => "yes",
-                    Some(None) => "no",
-                    None => "unk",
-                },
-            ];
-            data.request_count.with_label_values(label_values).inc();
-            if let Some(d) = duration {
-                data.request_duration.with_label_values(label_values).observe(d.into());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watcher: RecommendedWatcher = RecommendedWatcher::new_raw(tx)?;
+        watcher.watch(&filename, notify::RecursiveMode::NonRecursive)?;
+        let mut offset = file.seek(SeekFrom::End(0))?;
+
+        data.lock().unwrap().active = true;
+        info!("Watch established");
+
+        let mut buffer = String::new();
+
+        // Wait for events
+        loop {
+            let event: notify::RawEvent = rx.recv()?;
+
+            debug!("event: {:?}", event);
+
+            let reopen = match event.op {
+                Ok(op) if !(notify::op::Op::WRITE | notify::op::Op::CLOSE_WRITE).contains(op) => {
+                    info!("Restarting watch");
+                    true
+                }
+                Err(e) => return Err(e.into()),
+                _ => false,
+            };
+
+            if reopen {
+                data.lock().unwrap().active = false;
+                return Ok(());
             }
-            if let Some(s) = response_body_size {
-                data.response_body_size.with_label_values(label_values).observe(s as f64);
+
+            // Check size
+            let size = file.seek(SeekFrom::End(0))?;
+            if size < offset {
+                info!("Truncation detected ({} -> {})", offset, size);
+                offset = size;
+            }
+
+            // Read
+            file.seek(SeekFrom::Start(offset))?;
+            let res = file.read_to_string(&mut buffer)? as u64;
+            offset += res;
+
+            // Split into lines
+            let mut read_to = 0;
+            while let Some(ln) = buffer[read_to..].find('\n') {
+                let line = &buffer[read_to..read_to + ln];
+                debug!("line: {:?}", line);
+                read_to += ln + 1;
+
+                let mut data = data.lock().unwrap();
+
+                match data.process_line(log_parser, line, labels, filters, extractors) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        warn!("{}", e);
+                        data.error_count.inc();
+                        continue;
+                    }
+                };
+            }
+
+            // Discard the lines from the buffer
+            buffer.drain(0..read_to);
+        }
+    }
+
+    fn process_line(
+        &mut self,
+        log_parser: &LogParser,
+        line: &str,
+        labels: &[String],
+        filters: &[Filter],
+        extractors: &[Extractor],
+    ) -> Result<(), ParseError> {
+        let values = match log_parser.parse(line) {
+            Ok(v) => v,
+            Err(e) => return Err(e),
+        };
+
+        let mut label_values = vec![Borrowed("unk"); labels.len()];
+        let mut duration: Option<f32> = None;
+        let mut response_body_size: Option<u64> = None;
+
+        let mut extractor_index = 0;
+        let mut filter_index = 0;
+
+        for (field_index, value) in values.iter().enumerate() {
+            let LogValue { value, .. } = value;
+
+            // Run filters
+            while filter_index < filters.len() && filters[filter_index].field_index == field_index {
+                if !filters[filter_index].filter(value) {
+                    debug!("Skipping because of filter on {}", &log_parser.fields()[field_index]);
+                    return Ok(());
+                }
+
+                filter_index += 1;
+            }
+
+            // Run extractors
+            while extractor_index < extractors.len() && extractors[extractor_index].field_index == field_index {
+                extractors[extractor_index].extract(value, &mut label_values, &mut duration, &mut response_body_size)?;
+
+                extractor_index += 1;
             }
         }
 
-        // Discard the lines from the buffer
-        buffer.drain(0..read_to);
+        debug!("{}", line);
+        for (key, value) in labels.iter().zip(&label_values) {
+            debug!("    {}: {}", key, value);
+        }
+
+        let label_refs: Vec<&str> = label_values.iter().map(|v| -> &str { &v }).collect();
+
+        self.request_count.with_label_values(&label_refs).inc();
+        if let Some(d) = duration {
+            self.request_duration.with_label_values(&label_refs).observe(d.into());
+        }
+        if let Some(s) = response_body_size {
+            self.response_body_size.with_label_values(&label_refs).observe(s as f64);
+        }
+        Ok(())
     }
 }
 
-impl LogCollector {
-    fn new(log_parser: LogParser, filename: PathBuf) -> Result<LogCollector, notify::Error> {
-        let data = Data {
+struct LogCollectorBuilder {
+    log_parser: LogParser,
+    filename: PathBuf,
+    filters: Vec<Filter>,
+    extractors: Vec<Extractor>,
+    labels: Vec<String>,
+}
+
+impl LogCollectorBuilder {
+    /// Get the index of the label in the array, adding it if it's not there.
+    fn label(labels: &mut Vec<String>, label: &str) -> usize {
+        match labels.iter().position(|l| l == &label) {
+            Some(i) => i,
+            None => {
+                labels.push(label.to_owned());
+                labels.len() - 1
+            }
+        }
+    }
+
+    fn new(log_parser: LogParser, filename: PathBuf) -> LogCollectorBuilder {
+        let mut labels = Vec::new();
+
+        // Add extractors for the fields that are recognized
+        let mut extractors = Vec::new();
+        let mut add_extractor = |field_index: usize, label: Option<&str>, func: ExtractorFunc| {
+            extractors.push(Extractor {
+                label: match label {
+                    Some(l) => Some((l.to_owned(), Self::label(&mut labels, l))),
+                    None => None,
+                },
+                field_index,
+                func,
+            });
+        };
+        for (field_index, field) in log_parser.fields().iter().enumerate() {
+            if field == "remote_user" {
+                add_extractor(field_index, Some("user"), ExtractorFunc::User);
+            } else if field == "status" {
+                add_extractor(field_index, Some("status"), ExtractorFunc::Status);
+            } else if field == "request_time" {
+                add_extractor(field_index, None, ExtractorFunc::Duration);
+            } else if field == "host" {
+                add_extractor(field_index, Some("vhost"), ExtractorFunc::Host);
+            } else if field == "body_bytes_sent" {
+                add_extractor(field_index, None, ExtractorFunc::ResponseBodySize);
+            }
+        }
+
+        LogCollectorBuilder {
+            log_parser,
+            filename,
+            filters: Vec::new(),
+            extractors,
+            labels,
+        }
+    }
+
+    fn add_filter(&mut self, field: String, func: FilterFunc) -> Result<(), ()> {
+        let field_index = match self.log_parser.fields().iter().position(|f| f == &field) {
+            Some(i) => i,
+            None => {
+                return Err(());
+            }
+        };
+        self.filters.push(Filter {
+            field_index,
+            func,
+        });
+        Ok(())
+    }
+
+    fn add_extractor(&mut self, label: Option<String>, field: String, func: ExtractorFunc) -> Result<(), ()> {
+        let label = match label {
+            Some(label) => {
+                let label_index = Self::label(&mut self.labels, &label);
+                Some((label, label_index))
+            }
+            None => None,
+        };
+        let field_index = match self.log_parser.fields().iter().position(|f| f == &field) {
+            Some(i) => i,
+            None => {
+                return Err(());
+            }
+        };
+        self.extractors.push(Extractor {
+            label,
+            field_index,
+            func,
+        });
+        Ok(())
+    }
+
+    fn build(self) -> Result<LogCollector, notify::Error> {
+        let labels = self.labels.clone();
+        let label_refs: Vec<&str> = self.labels.iter().map(|v| -> &str { &v }).collect();
+
+        let data = LogData {
             active: false,
             request_count: IntCounterVec::new(
                 Opts::new("requests", "The total number of requests per HTTP status code and virtual host name"),
-                &["status", "vhost", "user"],
+                &label_refs,
             ).unwrap(),
             request_duration: HistogramVec::new(
                 HistogramOpts::new("request_duration", "Duration of HTTP requests in seconds per HTTP status code and virtual host name"),
-                &["status", "vhost", "user"],
+                &label_refs,
             ).unwrap(),
             response_body_size: HistogramVec::new(
                 HistogramOpts::new("response_body_size", "Size of responses' bodies in bytes HTTP status code and virtual host name")
                 .buckets(prometheus::exponential_buckets(100.0, 5.0, 10).unwrap()),
-                &["status", "vhost", "user"],
+                &label_refs,
             ).unwrap(),
             error_count: IntCounter::new("errors", "The total number of log lines that failed parsing").unwrap(),
         };
@@ -174,12 +383,18 @@ impl LogCollector {
 
         let data = Arc::new(Mutex::new(data));
 
+        let filename = self.filename;
+        let log_parser = self.log_parser;
+        let mut filters = self.filters;
+        filters.sort_by(|a, b| a.field_index.cmp(&b.field_index));
+        let mut extractors = self.extractors;
+        extractors.sort_by(|a, b| a.field_index.cmp(&b.field_index));
         let data_rc = data.clone();
         std::thread::spawn(move || {
-            let data: &Mutex<Data> = &data_rc;
+            let data: &Mutex<LogData> = &data_rc;
 
             loop {
-                match watch_log(&filename, &log_parser, data) {
+                match LogData::watch_log(data, &filename, &log_parser, &labels, &filters, &extractors) {
                     Ok(()) => {}
                     Err(e) => {
                         eprintln!("{}", e);
@@ -195,6 +410,11 @@ impl LogCollector {
             data,
         })
     }
+}
+
+struct LogCollector {
+    data: Arc<Mutex<LogData>>,
+    desc: Vec<Desc>,
 }
 
 impl Collector for LogCollector {
@@ -235,6 +455,15 @@ async fn serve_req(_req: Request<Body>) -> Result<Response<Body>, hyper::Error> 
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // End the process if any thread panics
+    // https://stackoverflow.com/a/36031130
+    let orig_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        // invoke the default handler and exit the process
+        orig_hook(panic_info);
+        std::process::exit(1);
+    }));
+
     let cli = App::new("access-log-to-prometheus-metrics")
         .bin_name("access-log-to-prometheus-metrics")
         .version(env!("CARGO_PKG_VERSION"))
@@ -260,6 +489,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .required(false)
                 .takes_value(true)
                 .default_value("127.0.0.1:9898")
+        )
+        .arg(
+            Arg::with_name("match")
+                .long("match")
+                .short("m")
+                .help("Only lines where <field> matches <regex>")
+                .required(false)
+                .multiple(true)
+                .takes_value(true)
+                .number_of_values(1)
+        )
+        .arg(
+            Arg::with_name("label")
+                .long("label")
+                .short("l")
+                .help("Set <label> to <value> from <field> with <regex>")
+                .required(false)
+                .multiple(true)
+                .takes_value(true)
+                .number_of_values(1)
         );
     let matches = cli.get_matches();
 
@@ -269,7 +518,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let parser = LogParser::from_format(matches.value_of("LOG_FORMAT").unwrap())?;
-    let collector = LogCollector::new(parser, Path::new(matches.value_of_os("FILE").unwrap()).to_owned())?;
+    let collector = LogCollectorBuilder::new(parser, Path::new(matches.value_of_os("FILE").unwrap()).to_owned());
+
+    #[cfg(feature = "re")]
+    let collector = {
+        let mut collector = collector;
+
+        if let Some(v) = matches.values_of("match") {
+            for s in v {
+                let parts: Vec<&str> = s.splitn(2, ':').collect();
+                if parts.len() != 2 {
+                    eprintln!("--match needs 2 arguments separated by ':'");
+                    std::process::exit(1);
+                }
+                if let Err(()) = collector.add_filter(
+                    parts[0].to_owned(),
+                    FilterFunc::Regex { regex: regex::Regex::new(parts[1])? },
+                ) {
+                    eprintln!("No field {:?}, can't add filter", parts[0]);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        if let Some(v) = matches.values_of("label") {
+            for s in v {
+                let parts: Vec<&str> = s.splitn(4, ':').collect();
+                if parts.len() != 4 {
+                    eprintln!("--label needs 4 arguments separated by ':'");
+                    std::process::exit(1);
+                }
+                if let Err(()) = collector.add_extractor(
+                    Some(parts[0].to_owned()),
+                    parts[2].to_owned(),
+                    ExtractorFunc::Regex {
+                        target: parts[1].to_owned(),
+                        regex: regex::Regex::new(&format!("^.*{}.*$", parts[3]))?,
+                    },
+                ) {
+                    eprintln!("No field {:?}, can't add extractor", parts[2]);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        collector
+    };
+    #[cfg(not(feature = "re"))]
+    {
+        if let Some(mut v) = matches.values_of("match") {
+            if let Some(_) = v.next() {
+                eprintln!("Support for --match and --label was not compiled in");
+                std::process::exit(1);
+            }
+        }
+        if let Some(mut v) = matches.values_of("label") {
+            if let Some(_) = v.next() {
+                eprintln!("Support for --match and --label was not compiled in");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let collector = collector.build()?;
 
     let registry: &Registry = default_registry();
     registry.register(Box::new(collector)).expect("register collector");

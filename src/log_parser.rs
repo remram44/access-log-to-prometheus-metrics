@@ -1,7 +1,7 @@
 use log::debug;
 
 #[derive(Debug)]
-pub struct ParseError(String);
+pub struct ParseError(pub String);
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -27,69 +27,65 @@ impl<'a> PeekableCharIndicesPosExt for std::iter::Peekable<std::str::CharIndices
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum LogToken {
     Str(String),
-    Field(LogField),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum LogField {
-    RemoteUser,
-    Request,
-    Status,
-    Host,
-    Duration,
-    BodyBytesSent,
-    Other(String),
+    Field(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum LogValue {
-    RemoteUser(String),
-    Request(String),
-    Status(u16),
-    Host(String),
-    Duration(f32),
-    BodyBytesSent(u64),
-    Other(String, String),
+pub struct LogValue<'a> {
+    pub variable: &'a str,
+    pub value: &'a str,
 }
 
 pub struct LogParser {
-    fields: Vec<LogToken>,
+    tokens: Vec<LogToken>,
+    fields: Vec<String>,
 }
 
 impl LogParser {
     pub fn from_format(format: &str) -> Result<LogParser, ParseError> {
-        let fields = LogFormatParser::new(format).parse()?;
-        Ok(LogParser { fields })
+        let tokens = LogFormatParser::new(format).parse()?;
+        let fields = tokens.iter().filter_map(|token| match token {
+            LogToken::Str(_) => None,
+            LogToken::Field(s) => Some(s.clone()),
+        }).collect();
+        Ok(LogParser {
+            tokens,
+            fields,
+        })
     }
 
-    pub fn parse(&self, log: &str) -> Result<Vec<LogValue>, ParseError> {
-        LogParserInner::new(&self.fields, log).parse()
+    pub fn parse<'a>(&'a self, log: &'a str) -> Result<Vec<LogValue<'a>>, ParseError> {
+        LogParserInner::new(&self.tokens, log).parse()
+    }
+
+    pub fn fields(&self) -> &[String] {
+        &self.fields
     }
 }
 
 struct LogParserInner<'a> {
-    fields: &'a [LogToken],
+    tokens: &'a [LogToken],
     log: &'a str,
     iter: std::iter::Peekable<std::str::CharIndices<'a>>,
-    values: Vec<LogValue>,
+    values: Vec<LogValue<'a>>,
 }
 
 impl<'a> LogParserInner<'a> {
-    fn new(fields: &'a [LogToken], log: &'a str) -> LogParserInner<'a> {
+    fn new(tokens: &'a [LogToken], log: &'a str) -> LogParserInner<'a> {
         LogParserInner {
-            fields,
+            tokens,
             log,
             iter: log.char_indices().peekable(),
             values: Vec::new(),
         }
     }
 
-    fn parse(mut self) -> Result<Vec<LogValue>, ParseError> {
-        for i in 0..self.fields.len() {
-            let field = &self.fields[i];
-            debug!("Matching field {:?}", field);
+    fn parse(mut self) -> Result<Vec<LogValue<'a>>, ParseError> {
+        for i in 0..self.tokens.len() {
+            let token = &self.tokens[i];
+            debug!("Matching token {:?}", token);
 
-            match field {
+            match token {
                 &LogToken::Str(ref s) => {
                     let start = self.iter.pos().unwrap_or(self.log.len());
                     let mut it = s.chars();
@@ -109,7 +105,7 @@ impl<'a> LogParserInner<'a> {
                     }
                 }
                 &LogToken::Field(ref f) => {
-                    let next = match self.fields.get(i + 1) {
+                    let next = match self.tokens.get(i + 1) {
                         None => None,
                         Some(&LogToken::Str(ref s)) => Some(s.chars().next().unwrap()),
                         Some(n) => return Err(ParseError(format!("Can't parse, no separator between {:?} and {:?}", f, n))),
@@ -131,34 +127,23 @@ impl<'a> LogParserInner<'a> {
                                             }
                                             None => return Err(ParseError(format!("Missing separator {:?}", sep))),
                                         }
-                                    }.to_owned()
+                                    }
                                 }
                                 None => {
-                                    String::new()
+                                    ""
                                 }
                             }
                         }
                         None => {
-                            debug!("Last field, reading to end");
+                            debug!("Last token, reading to end");
                             match self.iter.pos() {
-                                Some(i) => self.log[i..].to_owned(),
-                                None => String::new(),
+                                Some(i) => &self.log[i..],
+                                None => "",
                             }
                         }
                     };
 
-                    match f {
-                        LogField::RemoteUser => self.values.push(LogValue::RemoteUser(value)),
-                        LogField::Request => self.values.push(LogValue::Request(value)),
-                        LogField::Status => self.values.push(LogValue::Status(value.parse().map_err(|_| ParseError("Invalid status code".to_owned()))?)),
-                        LogField::Duration => {
-                            let seconds: f32 = value.parse().map_err(|_| ParseError("Invalid duration".to_owned()))?;
-                            self.values.push(LogValue::Duration(seconds));
-                        }
-                        LogField::Host => self.values.push(LogValue::Host(value)),
-                        LogField::BodyBytesSent => self.values.push(LogValue::BodyBytesSent(value.parse().map_err(|_| ParseError("Invalid number of bytes".to_owned()))?)),
-                        LogField::Other(ref s) => self.values.push(LogValue::Other(s.clone(), value)),
-                    }
+                    self.values.push(LogValue { variable: f, value });
                 }
             }
         }
@@ -169,7 +154,7 @@ impl<'a> LogParserInner<'a> {
 struct LogFormatParser<'a> {
     format: &'a str,
     iter: std::iter::Peekable<std::str::CharIndices<'a>>,
-    fields: Vec<LogToken>,
+    tokens: Vec<LogToken>,
 }
 
 impl<'a> LogFormatParser<'a> {
@@ -177,7 +162,7 @@ impl<'a> LogFormatParser<'a> {
         LogFormatParser {
             format,
             iter: format.char_indices().peekable(),
-            fields: Vec::new(),
+            tokens: Vec::new(),
         }
     }
 
@@ -220,7 +205,7 @@ impl<'a> LogFormatParser<'a> {
                 return Err(ParseError("Unexpected characters at the end".to_owned()));
             }
         }
-        Ok(self.fields)
+        Ok(self.tokens)
     }
 
     fn parse_format(&mut self) -> Result<(), ParseError> {
@@ -233,30 +218,16 @@ impl<'a> LogFormatParser<'a> {
                 self.iter.next();
                 let var = self.read_identifier()?;
                 debug!("Read identifier: {}", var);
-                if var == "remote_user" {
-                    self.fields.push(LogToken::Field(LogField::RemoteUser));
-                } else if var == "request" {
-                    self.fields.push(LogToken::Field(LogField::Request));
-                } else if var == "status" {
-                    self.fields.push(LogToken::Field(LogField::Status));
-                } else if var == "request_time" {
-                    self.fields.push(LogToken::Field(LogField::Duration));
-                } else if var == "host" {
-                    self.fields.push(LogToken::Field(LogField::Host));
-                } else if var == "body_bytes_sent" {
-                    self.fields.push(LogToken::Field(LogField::BodyBytesSent));
-                } else {
-                    self.fields.push(LogToken::Field(LogField::Other(var.to_owned())));
-                }
+                self.tokens.push(LogToken::Field(var.to_owned()));
             } else {
                 debug!("Found character {:?}", c);
                 self.iter.next();
-                match self.fields.last_mut() {
+                match self.tokens.last_mut() {
                     Some(LogToken::Str(ref mut s)) => s.push(c),
                     _ => {
                         let mut s = String::new();
                         s.push(c);
-                        self.fields.push(LogToken::Str(s));
+                        self.tokens.push(LogToken::Str(s));
                     }
                 }
             }
@@ -329,40 +300,49 @@ impl<'a> LogFormatParser<'a> {
 
 #[test]
 fn test_format_parser() {
-    use LogToken::Field;
-    use LogField::*;
-
+    fn f(n: &str) -> LogToken {
+        LogToken::Field(n.to_owned())
+    }
     fn s(r: &str) -> LogToken {
         LogToken::Str(r.to_owned())
     }
 
     assert_eq!(
         LogFormatParser::new("log_format combined '$remote_addr - $remote_user [$time_local]';").parse().unwrap(),
-        vec![Field(Other("remote_addr".to_owned())), s(" - "), Field(RemoteUser), s(" ["), Field(Other("time_local".to_owned())), s("]")],
+        vec![f("remote_addr"), s(" - "), f("remote_user"), s(" ["), f("time_local"), s("]")],
     );
     assert_eq!(
         LogFormatParser::new("    log_format '$remote_addr - $remote_user [$time_local]';  ").parse().unwrap(),
-        vec![Field(Other("remote_addr".to_owned())), s(" - "), Field(RemoteUser), s(" ["), Field(Other("time_local".to_owned())), s("]")],
+        vec![f("remote_addr"), s(" - "), f("remote_user"), s(" ["), f("time_local"), s("]")],
     );
     assert_eq!(
         LogFormatParser::new("$remote_addr - $remote_user [$time_local]").parse().unwrap(),
-        vec![Field(Other("remote_addr".to_owned())), s(" - "), Field(RemoteUser), s(" ["), Field(Other("time_local".to_owned())), s("]")],
+        vec![f("remote_addr"), s(" - "), f("remote_user"), s(" ["), f("time_local"), s("]")],
     );
 }
 
 #[test]
 fn test_parser() {
-    use LogToken::Field;
-    use LogField::*;
-
+    fn f(n: &str) -> LogToken {
+        LogToken::Field(n.to_owned())
+    }
     fn s(r: &str) -> LogToken {
         LogToken::Str(r.to_owned())
     }
+    fn v(n: &'static str, d: &'static str) -> LogValue<'static> {
+        LogValue {
+            variable: n,
+            value: d,
+        }
+    }
 
-    let parser = LogParser { fields: vec![Field(Other("remote_addr".to_owned())), s(" - "), Field(RemoteUser), s(" "), Field(Duration), s(" ["), Field(Other("time_local".to_owned())), s("]")] };
+    let parser = LogParser {
+        tokens: vec![f("remote_addr"), s(" - "), f("remote_user"), s(" "), f("request_time"), s(" ["), f("time_local"), s("]")],
+        fields: vec!["remote_addr".to_owned(), "remote_user".to_owned(), "request_time".to_owned(), "time_local".to_owned()],
+    };
 
     assert_eq!(
         parser.parse("216.165.95.86 - remi 0.012 [15/Oct/2021:15:39:52 +0000]").unwrap(),
-        vec![LogValue::Other("remote_addr".to_owned(), "216.165.95.86".to_owned()), LogValue::RemoteUser("remi".to_owned()), LogValue::Duration(0.012), LogValue::Other("time_local".to_owned(), "15/Oct/2021:15:39:52 +0000".to_owned())],
+        vec![v("remote_addr", "216.165.95.86"), v("remote_user", "remi"), v("request_time", "0.012"), v("time_local", "15/Oct/2021:15:39:52 +0000")],
     );
 }

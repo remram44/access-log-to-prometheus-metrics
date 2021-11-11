@@ -49,3 +49,46 @@ Metrics
 * `response_body_size` if a histogram for responses' body sizes in bytes, organized by `status` (the HTTP status code) and `vhost` (the virtual host name)
 
 Labels default to the string "unk" if they are unknown (e.g. those variables are not present in your log format).
+
+Custom rules
+------------
+
+If the default fields extracted from the log are not sufficient, you can specify custom filters and labels based on any field.
+
+The syntax for filters is:
+
+```
+-m <field>:<regex>
+```
+
+If the regex does not match the value of the field, that log entry will be dropped.
+
+Examples:
+
+```
+# Only process errors
+-m 'status:^50[0-9]$'
+# Only measure requests to API
+-m 'request:^[A-Z]+ /api/'
+# Ignore robots.txt
+-m 'request:^GET (?!robots\.txt) '
+```
+
+The syntax for labels is:
+
+```
+-l <label-name>:<value>:<field>:<regex>
+```
+
+A label `<label-name>` will be added to all metrics with the value extracted from the field.
+
+Examples:
+
+```
+# Add label for API version
+-l 'api_version:$1:request:^[A-Z]+ /api/(v[0-9]+)/'
+# Add label for client version
+-l 'client_version:app-$1,go-$2:referer:MyApp/([0-9.]+) Go/([0-9.]+)'
+# Add label for HTTP version
+-l 'http_version:HTTP/$1:request:^[A-Z]+ /[^ ]* HTTP/([0-9]+)$'
+```
