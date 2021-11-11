@@ -198,3 +198,105 @@ impl Collector for LogCollector {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use crate::collector::LogCollectorBuilder;
+    use crate::log_parser::LogParser;
+    use crate::processor::LogProcessor;
+
+    fn test_parse(processor: &LogProcessor, line: &str, expected: Option<(&[&str], Option<f32>, Option<u64>)>) {
+            let mut label_values = vec![std::borrow::Cow::Borrowed("unk"); processor.labels.len()];
+            let mut duration = None;
+            let mut response_body_size = None;
+            let matched = processor.process_line(
+                line,
+                &mut label_values,
+                &mut duration,
+                &mut response_body_size,
+            ).unwrap();
+            match (matched, expected) {
+                (false, None) => {}
+                (false, Some(_)) => panic!("Line was filtered unexpectedly"),
+                (true, None) => panic!("Line was not filtered"),
+                (true, Some((v, d, s))) => {
+                    assert_eq!(label_values, v);
+                    assert_eq!(duration, d);
+                    assert_eq!(response_body_size, s);
+                }
+            }
+    }
+
+    #[test]
+    fn test_process() {
+        let log_parser = LogParser::from_format(
+            r#"$host $remote_addr - $remote_user [$time_local] "$request" $status $request_time $body_bytes_sent "$http_referer" "$http_user_agent""#,
+        ).unwrap();
+        let collector_builder = LogCollectorBuilder::new(log_parser, "/tmp/access.log".into());
+        let data = Arc::new(Mutex::new(collector_builder.build_data()));
+        let processor = collector_builder.build_processor(data);
+
+        test_parse(
+            &processor,
+            r#"example.org 1.2.3.4 - - [11/Nov/2021:02:34:39 +0000] "GET /api/v4/pets/1 HTTP/1.1" 200 0.092 263 "-" "Mozilla/5.0 (Linux)""#,
+            Some((
+                &["example.org", "no", "200"],
+                Some(0.092),
+                Some(263),
+            )),
+        );
+        test_parse(
+            &processor,
+            r#"remram.fr 8.8.8.8 - person [11/Nov/2021:02:34:41 +0000] "POST /api/v4/pets HTTP/1.1" 201 0.132 14 "-" "Mozilla/5.0 (Linux)""#,
+            Some((
+                &["remram.fr", "yes", "201"],
+                Some(0.132),
+                Some(14),
+            )),
+        );
+    }
+
+    #[cfg(feature = "re")]
+    #[test]
+    fn test_process_re() {
+        use crate::processor::{FilterFunc, ExtractorFunc};
+
+        let log_parser = LogParser::from_format(
+            r#"$host $remote_addr - $remote_user [$time_local] "$request" $status $request_time $body_bytes_sent "$http_referer" "$http_user_agent""#,
+        ).unwrap();
+        let mut collector_builder = LogCollectorBuilder::new(log_parser, "/tmp/access.log".into());
+        // -m 'status:^200$'
+        collector_builder.add_filter(
+            "status".to_owned(),
+            FilterFunc::Regex { regex: regex::Regex::new("^200$").unwrap() },
+        ).unwrap();
+        // -l 'api_version:$1:request:^[A-Z]+ /api/(v[0-9]+)/'
+        collector_builder.add_extractor(
+            Some("api_version".to_owned()),
+            "request".to_owned(),
+            ExtractorFunc::Regex {
+                target: "$1".to_owned(),
+                regex: regex::Regex::new("^.*[A-Z]+ /api/(v[0-9]+)/.*$").unwrap(),
+            },
+        ).unwrap();
+        let data = Arc::new(Mutex::new(collector_builder.build_data()));
+        let processor = collector_builder.build_processor(data);
+
+        test_parse(
+            &processor,
+            r#"example.org 1.2.3.4 - - [11/Nov/2021:02:34:39 +0000] "GET /api/v4/pets/1 HTTP/1.1" 200 0.092 263 "-" "Mozilla/5.0 (Linux)""#,
+            Some((
+                &["example.org", "no", "200", "v4"],
+                Some(0.092),
+                Some(263),
+            )),
+        );
+        test_parse(
+            &processor,
+            r#"remram.fr 8.8.8.8 - person [11/Nov/2021:02:34:41 +0000] "POST /api/v4/pets HTTP/1.1" 201 0.132 14 "-" "Mozilla/5.0 (Linux)""#,
+            None,
+        );
+    }
+}
